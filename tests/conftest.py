@@ -43,3 +43,15 @@ def vp9_noaq():
 @pytest.fixture(scope="session")
 def odd():
     return str(ASSETS / "odd_250x170.mp4")
+
+
+@pytest.fixture(scope="session")
+def hd():
+    """1080p: padding overshoot (raw MV edge 1088 vs 1080 visible) and the token cap."""
+    return str(ASSETS / "hd_1080p.mp4")
+
+
+@pytest.fixture(scope="session")
+def static_box():
+    """Near-static scene, one small moving object. 27 of 50 frames have zero motion."""
+    return str(ASSETS / "static_box.mp4")

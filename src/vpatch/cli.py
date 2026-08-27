@@ -20,6 +20,7 @@ import numpy as np
 from vpatch.backends.ffmpeg_video import VideoExtractor, max_units_per_frame
 from vpatch.partition import MACROBLOCK, grid_shape
 from vpatch.patchify import FEATURE_LAYOUT, patchify_grid
+from vpatch.sampling import anchor_delta, budget, keyframe_anchors
 
 # Qwen2-VL / Qwen2.5-VL video defaults: 14x14 ViT patches, 2x2 spatial merge (so 28 luma
 # pixels per token side), 2 fps sampling, temporal patch size 2 (two sampled frames per
@@ -108,23 +109,31 @@ def cmd_stats(args: argparse.Namespace) -> int:
     sampled_fps = args.baseline_fps / BASELINE_TEMPORAL_MERGE
 
     observed = f[:, idx["observed_frac"]] > 0
-    moving = f[:, idx["inter_frac"]] > 0
-    speed = np.hypot(f[:, idx["l0_dx_mean"]], f[:, idx["l0_dy_mean"]])
-    active = moving & (speed >= args.motion_threshold)
 
     def per_sec(mask_frac: float, rate: float) -> float:
         return per_frame * mask_frac * rate
+
+    anchors = keyframe_anchors(frames)
+    pruned, report = anchor_delta(bundle, anchors=anchors,
+                                  motion_threshold=args.motion_threshold,
+                                  qp_delta=args.qp_delta)
+    capped = None
+    if args.max_tokens is not None:
+        capped, cap_report = budget(pruned, args.max_tokens, anchors=anchors)
 
     variants: list[tuple[str, float | None]] = [
         ("grid, every frame", per_sec(1.0, fps)),
         (f"grid, sampled @{sampled_fps:g}fps", per_sec(1.0, sampled_fps)),
         (f"observed only @{sampled_fps:g}fps", per_sec(observed.mean(), sampled_fps)),
-        # None, not 0.0. On a codec with no motion export the `moving` mask is empty, and
-        # printing 0.00x there would read as "pruned everything" when it means "there was
-        # nothing to prune by". A row that cannot be measured says so.
-        (f"|mv|>={args.motion_threshold:g}px @{sampled_fps:g}fps",
-         per_sec(active.mean(), sampled_fps) if cap.motion_vectors else None),
+        # None, not 0.0. On a codec with no motion export there is nothing to prune by,
+        # and printing 0.00x there would read as "pruned everything".
+        (f"anchor-delta @{sampled_fps:g}fps",
+         per_sec(report.kept_fraction, sampled_fps) if cap.motion_vectors else None),
     ]
+    if capped is not None:
+        variants.append((f"anchor-delta + cap {args.max_tokens} @{sampled_fps:g}fps",
+                         per_sec(cap_report.kept_fraction * report.kept_fraction,
+                                 sampled_fps)))
 
     print(f"{args.path}")
     print(f"  {info['codec']} {info['width']}x{info['height']} "
@@ -132,7 +141,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
     print(f"  grid {rows}x{cols} = {per_frame} cells/frame, D={f.shape[1]}")
     print(f"  coverage mean {np.mean([fr.coverage for fr in frames]):.4f}, "
           f"observed cells {observed.mean() * 100:.1f}%, "
-          f"moving cells {active.mean() * 100:.1f}%")
+          f"kept after delta pruning {report.kept_fraction * 100:.1f}%")
     print()
     print(f"  {'variant':<34} {'tok/s':>10} {'vs baseline':>12}")
     print(f"  {'-' * 34} {'-' * 10:>10} {'-' * 12:>12}")
@@ -144,8 +153,15 @@ def cmd_stats(args: argparse.Namespace) -> int:
         else:
             print(f"  {name:<34} {tps:10.1f} {tps / baseline:11.2f}x")
     print()
-    print("  Note: the last two rows are not yet a shipping configuration -- pruning and")
-    print("  its drop accounting are M4. They bound what pruning could reach.")
+    print(f"  anchors: {len(anchors)} keyframe(s) of {n_frames} frames -- every cell is")
+    print("  kept on those, so a missing token means 'unchanged since the last anchor'")
+    print(f"  rather than 'unknown'. cells never emitted: {report.cells_never_kept}, "
+          f"frames left empty: {report.frames_emptied}")
+    for rule, count in sorted(report.by_rule.items(), key=lambda kv: -kv[1]):
+        print(f"    {rule:<28} {count:>8}")
+    if capped is not None and cap_report.budget_below_anchor_floor:
+        print("  WARNING: token cap is below the anchor floor; anchors were dropped and")
+        print("  the 'absence means unchanged' contract no longer holds.")
 
     if args.json:
         print(json.dumps({
@@ -153,6 +169,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
             "cell": args.cell, "cells_per_frame": per_frame, "D": int(f.shape[1]),
             "baseline_tokens_per_s": baseline,
             "motion_vectors_available": cap.motion_vectors,
+            "drop_report": pruned.meta["drop_report"],
             "variants": {name: tps for name, tps in variants},
             "ratios": {name: (None if tps is None else tps / baseline)
                        for name, tps in variants},
@@ -177,6 +194,13 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--baseline-fps", type=float, default=BASELINE_FPS)
     s.add_argument("--motion-threshold", type=float, default=0.5,
                    help="luma pixels of mean L0 motion below which a cell counts as static")
+    s.add_argument("--qp-delta", type=float, default=None,
+                   help="also keep cells whose QP moved this far from their anchor. Off "
+                        "by default: rate control wanders QP every frame even in a "
+                        "static scene, so at qp_delta=2 it keeps 95%% of a near-static "
+                        "clip that motion alone prunes to 12%%.")
+    s.add_argument("--max-tokens", type=int, default=None,
+                   help="hard token cap applied after delta pruning")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_stats)
 

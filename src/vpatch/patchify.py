@@ -230,6 +230,10 @@ def patchify_grid(frames: list[CodedFrame], *, cell: int = MACROBLOCK,
             "ref_identity_available": False,
             "n_frames": len(ordered),
             "grid": grid_shape(ordered[0].width, ordered[0].height, cell),
+            # Needed to recover a cell index from normalised coords: the last row and
+            # column are partial whenever `cell` does not divide the frame, so scaling a
+            # centre by the grid size does not invert.
+            "frame_size": (ordered[0].width, ordered[0].height),
             **(meta or {}),
         },
     )

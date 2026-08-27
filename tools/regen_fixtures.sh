@@ -16,6 +16,20 @@ $FF -y -v error -f lavfi -i testsrc2=size=640x480:rate=25 -t 2 \
 # Non-multiple-of-16 size: exercises macroblock padding overshoot and clipping.
 $FF -y -v error -f lavfi -i testsrc2=size=250x170:rate=25 -t 1 \
     -c:v libx264 -bf 2 -g 12 -threads 1 odd_250x170.mp4
+# 1080p: macroblock padding overshoot is only visible at a height that is not a multiple
+# of 16. 1080 = 67.5 macroblock rows, so raw MV records reach an exclusive bottom edge of
+# 1088 while the API reports 1080. Also the size the hard token cap is asserted at.
+$FF -y -v error -f lavfi -i testsrc2=size=1920x1080:rate=25 -t 0.2 \
+    -c:v libx264 -bf 2 -g 8 -qp 40 -threads 1 hd_1080p.mp4
+# Near-static scene with one small moving object -- the case that breaks naive pruning.
+# 27 of its 50 frames contain no moving cell at all, so a "drop zero-motion cells" policy
+# deletes them entirely. Generated from a held still frame so the background is genuinely
+# static rather than merely low-motion.
+$FF -y -v error -f lavfi -i testsrc2=size=320x240:rate=25 -frames:v 1 still.png
+$FF -y -v error -loop 1 -i still.png -f lavfi -i "color=c=white:s=16x16:r=25" \
+    -filter_complex "[0:v]fps=25[bg];[bg][1:v]overlay=x='40+2*n':y=112:shortest=0" \
+    -t 2 -c:v libx264 -bf 2 -g 12 -threads 1 -pix_fmt yuv420p static_box.mp4
+rm -f still.png
 sha256sum *.mp4 > SHA256SUMS
 $FF -version | head -1 >  VERSIONS
 $FF -hide_banner -h encoder=libx264 2>/dev/null | head -1 >> VERSIONS
