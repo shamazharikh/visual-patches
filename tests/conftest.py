@@ -1,0 +1,45 @@
+import hashlib
+import pathlib
+
+import pytest
+
+ASSETS = pathlib.Path(__file__).parent / "assets"
+
+
+def pytest_sessionstart(session):
+    """Fixtures are committed and pinned: a silently different bitstream would change
+    every measured number in this suite."""
+    sums = (ASSETS / "SHA256SUMS").read_text().split()
+    for digest, name in zip(sums[0::2], sums[1::2]):
+        actual = hashlib.sha256((ASSETS / name).read_bytes()).hexdigest()
+        assert actual == digest, f"fixture {name} changed; rerun tools/regen_fixtures.sh"
+
+
+@pytest.fixture(scope="session")
+def h264():
+    return str(ASSETS / "h264_b3.mp4")
+
+
+@pytest.fixture(scope="session")
+def hevc():
+    return str(ASSETS / "hevc_b3.mp4")
+
+
+@pytest.fixture(scope="session")
+def pan():
+    return str(ASSETS / "pan.mp4")
+
+
+@pytest.fixture(scope="session")
+def vp9():
+    return str(ASSETS / "vp9_aq1.webm")
+
+
+@pytest.fixture(scope="session")
+def vp9_noaq():
+    return str(ASSETS / "vp9_noaq.webm")
+
+
+@pytest.fixture(scope="session")
+def odd():
+    return str(ASSETS / "odd_250x170.mp4")

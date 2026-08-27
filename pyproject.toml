@@ -1,0 +1,22 @@
+[project]
+name = "vpatch"
+version = "0.1.0"
+description = "Compressed-domain patch extraction: codec metadata (motion vectors, per-macroblock QP, frame structure) as VLM patch features"
+readme = "README.md"
+authors = [
+    { name = "Mazhar Shaikh", email = "mazhar@hakimo.ai" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "av>=18.1.0",
+    "numpy>=2.5.2",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
