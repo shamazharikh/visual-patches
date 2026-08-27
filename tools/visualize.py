@@ -32,14 +32,18 @@ from vpatch.types import UnitKind
 
 IDX = {n: i for i, n in enumerate(FEATURE_LAYOUT)}
 
-# Colourblind-safe, and ordered so finer partitions read as hotter.
+# Hues taken from SMPTE colour bars -- the canonical video test signal -- and desaturated
+# so they work as UI. Keyed by block size rather than by codec, so a 16x16 reads the same
+# whether it came from an H.264 macroblock or a VP9 leaf.
 SHAPE_COLOURS = {
-    (16, 16): "#3b6ea5",
-    (16, 8): "#4fa3a5",
-    (8, 16): "#d9a441",
-    (8, 8): "#c8553d",
+    (64, 64): "#9c5195",
+    (32, 32): "#3a6ea8",
+    (16, 16): "#2f8f96",
+    (16, 8): "#c9a227",
+    (8, 16): "#3f8f5c",
+    (8, 8): "#c04a3d",
 }
-FILL_COLOUR = "#6b6b6b"
+FILL_COLOUR = "#6b7480"
 
 
 def _jpeg_data_uri(luma: np.ndarray, quality: int = 85) -> str:
@@ -136,6 +140,29 @@ def panel_qp(frame) -> str:
                 f'<rect x="{c * 16}" y="{r * 16}" width="16" height="16" '
                 f'fill="{_heat((qp[r, c] - lo) / span)}" opacity="0.82"/>'
             )
+    return "".join(parts)
+
+
+def panel_unit_qp(frame) -> str:
+    """Shade each coding unit by its own QP.
+
+    Distinct from the macroblock QP map: VP9 carries `delta_qp` per block of a variable
+    tree, so there is no fixed grid to draw it on. This is the only way to see it.
+    """
+    qps = [u.qp for u in frame.units if u.qp is not None]
+    if not qps:
+        return '<text x="8" y="20" fill="#888" font-size="14">no per-unit QP</text>'
+    lo, hi = min(qps), max(qps)
+    span = max(hi - lo, 1e-6)
+    parts = []
+    for u in frame.units:
+        if u.qp is None:
+            continue
+        parts.append(
+            f'<rect x="{u.x}" y="{u.y}" width="{u.w}" height="{u.h}" '
+            f'fill="{_heat((u.qp - lo) / span)}" opacity="0.8" '
+            f'stroke="#07090c" stroke-width="0.4"/>'
+        )
     return "".join(parts)
 
 
