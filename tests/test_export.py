@@ -72,3 +72,26 @@ def test_vpatch_never_imports_vllm():
     out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True,
                          check=True)
     assert out.stdout.strip() == "", f"vpatch imported vllm: {out.stdout}"
+
+
+def test_visualizer_produces_a_self_contained_page(h264, tmp_path):
+    """The overlays are how the claims get checked by eye, so they must not break quietly."""
+    import re
+    import sys
+
+    sys.path.insert(0, "tools")
+    from visualize import build
+
+    out = tmp_path / "panels.html"
+    build(h264, str(out), frame_index=None, cell=16)
+    doc = out.read_text()
+    # Self-contained: the picture is embedded, nothing is fetched.
+    assert "data:image/jpeg;base64," in doc
+    assert "http://" not in doc.replace("http://www.w3.org/2000/svg", "")
+    assert doc.count("<figure>") == 7
+    # Overlays actually drew something.
+    assert doc.count("<rect") > 100
+    assert "<line" in doc
+    embedded = re.search(r"data:image/jpeg;base64,([A-Za-z0-9+/=]+)", doc).group(1)
+    import base64
+    assert base64.b64decode(embedded)[:3] == b"\xff\xd8\xff"  # JPEG magic
