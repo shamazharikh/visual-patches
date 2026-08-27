@@ -157,5 +157,13 @@ class CorruptBitstream(Exception):
     """Decoder concealed errors; extracted metadata would be fabricated."""
 
 
+class ResourceLimitExceeded(Exception):
+    """A caller-set bound on decode work was hit.
+
+    Distinct from UnsupportedCodecFeature: nothing about the input is wrong or
+    unrepresentable, it is simply larger or slower than this caller allowed.
+    """
+
+
 class ResolutionChanged(Exception):
     """Coded dimensions changed mid-stream; one normalized coordinate space is invalid."""

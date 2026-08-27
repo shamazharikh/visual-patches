@@ -11,6 +11,7 @@ than emitting zeros that look like measurements.
 from __future__ import annotations
 
 import math
+import time
 from collections import Counter
 from dataclasses import dataclass, replace
 
@@ -26,6 +27,7 @@ from vpatch.types import (
     CorruptBitstream,
     MotionVector,
     ResolutionChanged,
+    ResourceLimitExceeded,
     UnitKind,
     UnsupportedCodecFeature,
 )
@@ -68,6 +70,19 @@ class Capability:
     def degraded(self) -> bool:
         """No geometry of any kind -- neither motion nor a partition tree."""
         return not (self.motion_vectors or self.partitions)
+
+
+def canonical_codec(codec_context) -> str:
+    """The codec's own name, not the name of whichever decoder ffmpeg picked.
+
+    `codec_context.name` is the DECODER: an AV1 stream reads back as "libdav1d", and a
+    build linked against libopenh264 would report "libopenh264" for ordinary H.264. Since
+    the capability table is keyed by codec, reading the decoder name would have quietly
+    demoted a fully capable file to the degraded tier -- a false "no motion available"
+    on input this library handles, which is the worst direction for the error to run.
+    """
+    codec = codec_context.codec
+    return getattr(codec, "canonical_name", None) or codec_context.name
 
 
 def capability_for(codec: str) -> Capability:
@@ -235,20 +250,27 @@ def _qp_at(qp_map: np.ndarray | None, x: int, y: int) -> int | None:
 class VideoExtractor:
     def __init__(self, path: str, *, pixels: bool = True, strict: bool = True,
                  fill_holes: bool = True, max_frames: int | None = None,
-                 max_pixels: int = 8192 * 8192, thread_count: int = 1):
+                 max_pixels: int = 8192 * 8192, max_decode_seconds: float | None = None,
+                 thread_count: int = 1):
         self.path = path
         self.pixels = pixels
         self.strict = strict
         self.fill_holes = fill_holes
         self.max_frames = max_frames
         self.max_pixels = max_pixels
+        # Wall-clock bound on the whole read, demux included: `_packet_order` walks every
+        # packet in the file before decoding starts, so a cap that only covered the decode
+        # loop would not bound the work on a large input.
+        self.max_decode_seconds = max_decode_seconds
         # Threading is part of the purity contract: it must not change the output.
         self.thread_count = thread_count
 
     def capability(self, *, probe_frames: int = 0) -> Capability:
         """Declared capability; with probe_frames > 0, trial-decode to confirm it."""
         with open_container(self.path) as container:
-            cap = capability_for(container.streams.video[0].codec_context.name)
+            cap = capability_for(
+                canonical_codec(container.streams.video[0].codec_context)
+            )
         if not probe_frames:
             return cap
         found = False
@@ -260,7 +282,10 @@ class VideoExtractor:
         return replace(cap, observed=found)
 
     def extract(self) -> list[CodedFrame]:
+        deadline = (time.monotonic() + self.max_decode_seconds
+                    if self.max_decode_seconds is not None else None)
         decode_ranks, n_packets = _packet_order(self.path)
+        self._check_deadline(deadline, 0)
         # Frames arrive from the decoder in display order; each one claims the next
         # unused decode rank for its PTS, so duplicate timestamps stay distinguishable.
         claimed: Counter[int] = Counter()
@@ -268,7 +293,7 @@ class VideoExtractor:
         with open_container(self.path) as container:
             stream = container.streams.video[0]
             ctx = stream.codec_context
-            codec = ctx.name
+            codec = canonical_codec(ctx)
             cap = capability_for(codec)
             ctx.thread_count = self.thread_count
             if cap.motion_vectors:
@@ -284,9 +309,11 @@ class VideoExtractor:
             # 50 on the reference fixture -- and still yields a valid index permutation.
             for frame in container.decode(stream):
                 if frame.width * frame.height > self.max_pixels:
-                    raise UnsupportedCodecFeature(
-                        f"frame {frame.width}x{frame.height} exceeds max_pixels={self.max_pixels}"
+                    raise ResourceLimitExceeded(
+                        f"frame {frame.width}x{frame.height} exceeds "
+                        f"max_pixels={self.max_pixels}"
                     )
+                self._check_deadline(deadline, len(frames))
                 if first_dims is None:
                     first_dims = (frame.width, frame.height)
                 elif (frame.width, frame.height) != first_dims:
@@ -312,6 +339,13 @@ class VideoExtractor:
         for display_index, frame in enumerate(sorted(frames, key=lambda f: f.display_index)):
             frame.display_index = display_index
         return frames
+
+    def _check_deadline(self, deadline: float | None, decoded: int) -> None:
+        if deadline is not None and time.monotonic() > deadline:
+            raise ResourceLimitExceeded(
+                f"decode exceeded max_decode_seconds={self.max_decode_seconds} "
+                f"after {decoded} frames"
+            )
 
     def _build(self, frame, cap: Capability, decode_ranks: dict[int, list[int]],
                claimed: Counter[int]) -> CodedFrame:

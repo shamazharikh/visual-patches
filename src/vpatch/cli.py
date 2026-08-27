@@ -19,6 +19,7 @@ import numpy as np
 
 from vpatch.backends.ffmpeg_video import (
     VideoExtractor,
+    canonical_codec,
     max_units_per_frame,
     open_container,
 )
@@ -46,7 +47,7 @@ def _probe_container(path: str) -> dict:
         elif container.duration:
             duration = container.duration / av.time_base
         return {
-            "codec": st.codec_context.name,
+            "codec": canonical_codec(st.codec_context),
             "width": st.codec_context.width,
             "height": st.codec_context.height,
             "fps": fps,

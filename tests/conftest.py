@@ -55,3 +55,30 @@ def hd():
 def static_box():
     """Near-static scene, one small moving object. 27 of 50 frames have zero motion."""
     return str(ASSETS / "static_box.mp4")
+
+
+@pytest.fixture(scope="session")
+def interlaced():
+    """Field-coded, and it DOES export MVs -- the guard is necessary, not theoretical."""
+    return str(ASSETS / "interlaced.mp4")
+
+
+@pytest.fixture(scope="session")
+def h264_10bit():
+    return str(ASSETS / "h264_10bit.mp4")
+
+
+@pytest.fixture(scope="session")
+def vp8():
+    return str(ASSETS / "vp8.webm")
+
+
+@pytest.fixture(scope="session")
+def av1():
+    return str(ASSETS / "av1.mp4")
+
+
+@pytest.fixture(scope="session")
+def reschange():
+    """Two resolutions concatenated as Annex-B; the decoder re-inits at the second SPS."""
+    return str(ASSETS / "reschange.264")

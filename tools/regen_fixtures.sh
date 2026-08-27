@@ -39,4 +39,28 @@ $FF -y -v error -f lavfi -i testsrc2=size=640x480:rate=25 -t 2 \
     -c:v libvpx-vp9 -b:v 800k -aq-mode 1 -row-mt 1 -threads 1 -deadline good -cpu-used 4 vp9_aq1.webm
 $FF -y -v error -f lavfi -i testsrc2=size=640x480:rate=25 -t 2 \
     -c:v libvpx-vp9 -b:v 800k -threads 1 -deadline good -cpu-used 4 vp9_noaq.webm
-sha256sum *.mp4 *.webm > SHA256SUMS
+# --- degraded tier and typed-rejection fixtures ---------------------------------
+# Interlaced. ffmpeg's field-to-frame MV correction (my *= 2) lives only in the
+# IS_16X8/IS_8X16 branches, so 16x16 and 8x8 macroblocks would carry half-magnitude
+# vertical motion. This clip DOES export MVs, which is what makes the guard necessary
+# rather than theoretical.
+$FF -y -v error -f lavfi -i testsrc2=size=320x240:rate=25 -t 1 \
+    -c:v libx264 -flags +ilme+ildct -top 1 -bf 0 -threads 1 interlaced.mp4
+# 10-bit: QP range shifts by 6*(bit_depth-8), so qp_map values are not comparable
+# across bit depths.
+$FF -y -v error -f lavfi -i testsrc2=size=320x240:rate=25 -t 1 \
+    -pix_fmt yuv420p10le -c:v libx264 -bf 2 -threads 1 h264_10bit.mp4
+# VP8 and AV1: the rest of the degraded tier. Neither exports motion or partitions.
+$FF -y -v error -f lavfi -i testsrc2=size=320x240:rate=25 -t 1 \
+    -c:v libvpx -b:v 400k -threads 1 vp8.webm
+$FF -y -v error -f lavfi -i testsrc2=size=320x240:rate=25 -t 0.8 \
+    -c:v libaom-av1 -cpu-used 8 -b:v 300k -threads 1 av1.mp4
+# Mid-stream resolution change. Annex-B elementary streams concatenate and the decoder
+# re-inits at the second SPS; MP4 cannot carry this, so the fixture is a raw .264.
+$FF -y -v error -f lavfi -i testsrc2=size=320x240:rate=25 -t 0.4 \
+    -c:v libx264 -bf 0 -g 5 -threads 1 -f h264 _a.264
+$FF -y -v error -f lavfi -i testsrc2=size=160x120:rate=25 -t 0.4 \
+    -c:v libx264 -bf 0 -g 5 -threads 1 -f h264 _b.264
+cat _a.264 _b.264 > reschange.264
+rm -f _a.264 _b.264
+sha256sum *.mp4 *.webm *.264 > SHA256SUMS
