@@ -18,6 +18,7 @@ import numpy as np
 from av.codec.context import Flags2
 from av.video.frame import PictureType
 
+from vpatch.partition import canonical_sort, clip_rect, grid_fill
 from vpatch.types import (
     CodedFrame,
     CodedUnit,
@@ -124,21 +125,21 @@ def _units_from_mvs(arr: np.ndarray, width: int, height: int, qp_map: np.ndarray
     for (ux, uy, uw, uh), mvs in grouped.items():
         # Coordinates live in macroblock-PADDED coded space; the bottom/right rows
         # overhang the visible frame and must be clipped before anything is normalized.
-        cx0, cy0 = max(ux, 0), max(uy, 0)
-        cx1, cy1 = min(ux + uw, width), min(uy + uh, height)
-        if cx1 <= cx0 or cy1 <= cy0:
+        rect = clip_rect(ux, uy, uw, uh, width, height)
+        if rect is None:
             continue
-        occupancy[cy0:cy1, cx0:cx1] = True
+        cx0, cy0, cw, ch = rect
+        occupancy[cy0:cy0 + ch, cx0:cx0 + cw] = True
         units.append(
             CodedUnit(
-                x=cx0, y=cy0, w=cx1 - cx0, h=cy1 - cy0,
+                x=cx0, y=cy0, w=cw, h=ch,
                 kind=UnitKind.INTER,
                 geometry_observed=True,
                 mvs=tuple(sorted(mvs, key=lambda m: m.list_idx)),
                 qp=_qp_at(qp_map, cx0, cy0),
             )
         )
-    units.sort(key=lambda u: (u.y, u.x))
+    canonical_sort(units)
     return units, occupancy
 
 
@@ -159,14 +160,14 @@ def _units_from_enc_params(enc, width: int, height: int
     base_qp = int(enc.qp)
     for i in range(enc.nb_blocks):
         b = enc.block_params(i)
-        x0, y0 = int(b.src_x), int(b.src_y)
-        x1, y1 = min(x0 + int(b.w), width), min(y0 + int(b.h), height)
-        if x1 <= x0 or y1 <= y0:
+        rect = clip_rect(int(b.src_x), int(b.src_y), int(b.w), int(b.h), width, height)
+        if rect is None:
             continue
-        occupancy[y0:y1, x0:x1] = True
+        x0, y0, bw, bh = rect
+        occupancy[y0:y0 + bh, x0:x0 + bw] = True
         units.append(
             CodedUnit(
-                x=x0, y=y0, w=x1 - x0, h=y1 - y0,
+                x=x0, y=y0, w=bw, h=bh,
                 kind=None,
                 geometry_observed=True,
                 mvs=(),
@@ -176,7 +177,7 @@ def _units_from_enc_params(enc, width: int, height: int
     # Blocks arrive in tile-decode order, which varies with thread count. The tiling is
     # exact, so (y, x) is a unique canonical key -- without this sort, extraction is not
     # reproducible across thread counts.
-    units.sort(key=lambda u: (u.y, u.x))
+    canonical_sort(units)
     return units, occupancy
 
 
@@ -187,31 +188,6 @@ def _qp_at(qp_map: np.ndarray | None, x: int, y: int) -> int | None:
     if 0 <= mb_y < qp_map.shape[0] and 0 <= mb_x < qp_map.shape[1]:
         return int(qp_map[mb_y, mb_x])
     return None
-
-
-def _fill_holes(occupancy: np.ndarray, width: int, height: int, qp_map: np.ndarray | None,
-                block: int = 16) -> list[CodedUnit]:
-    """Cover unobserved area with grid blocks flagged geometry_observed=False.
-
-    Holes are intra regions (100% of an I-frame, typically 10-15% of a P-frame). They are
-    inferred structure, and the flag is what lets a consumer tell them from real partitions.
-    """
-    fill: list[CodedUnit] = []
-    for by in range(0, height, block):
-        for bx in range(0, width, block):
-            y1, x1 = min(by + block, height), min(bx + block, width)
-            if occupancy[by:y1, bx:x1].all():
-                continue
-            fill.append(
-                CodedUnit(
-                    x=bx, y=by, w=x1 - bx, h=y1 - by,
-                    kind=UnitKind.INTRA,
-                    geometry_observed=False,
-                    mvs=(),
-                    qp=_qp_at(qp_map, bx, by),
-                )
-            )
-    return fill
 
 
 class VideoExtractor:
@@ -334,8 +310,10 @@ class VideoExtractor:
 
         coverage = float(occupancy.mean())
         if self.fill_holes:
-            units = units + _fill_holes(occupancy, w, h, qp_map)
-        units.sort(key=lambda u: (u.y, u.x, u.w, u.h))
+            units = units + grid_fill(
+                occupancy, w, h, lambda x, y: _qp_at(qp_map, x, y)
+            )
+        canonical_sort(units)
 
         return CodedFrame(
             decode_index=decode_pos.get(frame.pts, -1),
