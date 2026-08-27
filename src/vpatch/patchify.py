@@ -62,30 +62,89 @@ D = len(FEATURE_LAYOUT)
 _IDX = {name: i for i, name in enumerate(FEATURE_LAYOUT)}
 
 
-class _Acc:
-    """Area-weighted first and second moments over one grid."""
+def _unit_arrays(units, cell, width, height):
+    """Flatten units into parallel arrays, plus per-unit per-list motion moments.
 
-    __slots__ = ("w", "s", "ss")
+    Motion is reduced to sums here rather than kept per-vector because every MV on a
+    unit shares that unit's overlap weight, so `w += a*n`, `s += a*sum(v)`,
+    `ss += a*sum(v^2)` is exactly what a per-vector loop would accumulate.
+    """
+    n = len(units)
+    ux = np.empty(n, dtype=np.int64)
+    uy = np.empty(n, dtype=np.int64)
+    uw = np.empty(n, dtype=np.int64)
+    uh = np.empty(n, dtype=np.int64)
+    log2a = np.empty(n, dtype=np.float64)
+    observed = np.empty(n, dtype=np.float64)
+    inter = np.empty(n, dtype=np.float64)
+    unknown = np.empty(n, dtype=np.float64)
+    bipred = np.empty(n, dtype=np.float64)
+    qp_has = np.zeros(n, dtype=np.float64)
+    qp_s = np.zeros(n, dtype=np.float64)
+    qp_ss = np.zeros(n, dtype=np.float64)
+    # [list][0..3] = count, sum dx, sum dy, sum mag  and their squares
+    mv = np.zeros((2, 7, n), dtype=np.float64)
 
-    def __init__(self, rows: int, cols: int, n: int):
-        self.w = np.zeros((rows, cols), dtype=np.float64)
-        self.s = np.zeros((rows, cols, n), dtype=np.float64)
-        self.ss = np.zeros((rows, cols, n), dtype=np.float64)
+    for i, u in enumerate(units):
+        ux[i], uy[i], uw[i], uh[i] = u.x, u.y, u.w, u.h
+        area = u.w * u.h
+        log2a[i] = math.log2(area) if area > 0 else 0.0
+        observed[i] = 1.0 if u.geometry_observed else 0.0
+        inter[i] = 1.0 if u.kind is UnitKind.INTER else 0.0
+        unknown[i] = 1.0 if u.kind is None else 0.0
+        if u.qp is not None:
+            qp_has[i] = 1.0
+            qp_s[i] = float(u.qp)
+            qp_ss[i] = float(u.qp) ** 2
+        lists = set()
+        for m in u.mvs:
+            li = 1 if m.list_idx else 0
+            lists.add(li)
+            mag = math.hypot(m.dx, m.dy)
+            mv[li, 0, i] += 1.0
+            mv[li, 1, i] += m.dx
+            mv[li, 2, i] += m.dy
+            mv[li, 3, i] += mag
+            mv[li, 4, i] += m.dx * m.dx
+            mv[li, 5, i] += m.dy * m.dy
+            mv[li, 6, i] += mag * mag
+        bipred[i] = 1.0 if len(lists) > 1 else 0.0
 
-    def add(self, r: int, c: int, area: float, vals: tuple[float, ...]) -> None:
-        self.w[r, c] += area
-        v = np.asarray(vals, dtype=np.float64)
-        self.s[r, c] += area * v
-        self.ss[r, c] += area * v * v
+    return dict(x=ux, y=uy, w=uw, h=uh, log2a=log2a, observed=observed, inter=inter,
+                unknown=unknown, bipred=bipred, qp_has=qp_has, qp_s=qp_s, qp_ss=qp_ss,
+                mv=mv)
 
-    def mean_std(self) -> tuple[np.ndarray, np.ndarray]:
-        w = np.maximum(self.w, 1e-12)[..., None]
-        mean = self.s / w
-        # Clamped: the identity E[x^2] - E[x]^2 goes slightly negative under float
-        # cancellation when every sample in a cell is identical, which is the common case.
-        var = np.maximum(self.ss / w - mean * mean, 0.0)
-        empty = (self.w == 0.0)[..., None]
-        return np.where(empty, 0.0, mean), np.where(empty, 0.0, np.sqrt(var))
+
+def _pairs(a, cell, width, height, cols):
+    """Expand units into (unit, cell) pairs with their overlap areas.
+
+    A unit touches one cell in the common case and up to sixteen for a VP9 64x64
+    superblock over a 16px grid, so the pair list is built by repeat/arithmetic rather
+    than a nested Python loop -- at 1080p there are ~8k units per frame and the loop
+    version cost 4x the decode it was reading from.
+    """
+    c0x, c1x = a["x"] // cell, (a["x"] + a["w"] - 1) // cell
+    c0y, c1y = a["y"] // cell, (a["y"] + a["h"] - 1) // cell
+    nx, ny = c1x - c0x + 1, c1y - c0y + 1
+    npairs = nx * ny
+    total = int(npairs.sum())
+    if total == 0:
+        return None
+
+    idx = np.repeat(np.arange(len(npairs)), npairs)
+    starts = np.cumsum(npairs) - npairs
+    k = np.arange(total) - np.repeat(starts, npairs)
+    nx_r = np.repeat(nx, npairs)
+    cx = np.repeat(c0x, npairs) + k % nx_r
+    cy = np.repeat(c0y, npairs) + k // nx_r
+
+    x, y = a["x"][idx], a["y"][idx]
+    ow = np.minimum(x + a["w"][idx], np.minimum((cx + 1) * cell, width)) - np.maximum(x, cx * cell)
+    oh = np.minimum(y + a["h"][idx], np.minimum((cy + 1) * cell, height)) - np.maximum(y, cy * cell)
+    area = (np.maximum(ow, 0) * np.maximum(oh, 0)).astype(np.float64)
+
+    keep = area > 0
+    return idx[keep], (cy * cols + cx)[keep], area[keep]
 
 
 def frame_features(frame: CodedFrame, cell: int = MACROBLOCK
@@ -95,80 +154,63 @@ def frame_features(frame: CodedFrame, cell: int = MACROBLOCK
     Returns (features [R, C, D], kinds [R, C] int8, coords [R, C, 4] float32).
     """
     rows, cols = grid_shape(frame.width, frame.height, cell)
-    l0 = _Acc(rows, cols, 3)   # dx, dy, magnitude
-    l1 = _Acc(rows, cols, 3)
-    geom = _Acc(rows, cols, 1)  # log2 area
-    qp = _Acc(rows, cols, 1)
+    ncell = rows * cols
+    feats = np.zeros((ncell, D), dtype=np.float64)
+    area_tot = np.zeros(ncell, dtype=np.float64)
+    inter_a = np.zeros(ncell, dtype=np.float64)
+    unknown_a = np.zeros(ncell, dtype=np.float64)
+    log2_min = np.full(ncell, np.inf, dtype=np.float64)
 
-    area_tot = np.zeros((rows, cols), dtype=np.float64)
-    inter_a = np.zeros((rows, cols), dtype=np.float64)
-    observed_a = np.zeros((rows, cols), dtype=np.float64)
-    bipred_a = np.zeros((rows, cols), dtype=np.float64)
-    unknown_a = np.zeros((rows, cols), dtype=np.float64)
-    log2_min = np.full((rows, cols), np.inf, dtype=np.float64)
-    count = np.zeros((rows, cols), dtype=np.float64)
+    a = _unit_arrays(frame.units, cell, frame.width, frame.height) if frame.units else None
+    expanded = _pairs(a, cell, frame.width, frame.height, cols) if a is not None else None
 
-    for u in frame.units:
-        lists = {m.list_idx for m in u.mvs}
-        is_bipred = len(lists) > 1
-        log2_area = math.log2(u.area) if u.area > 0 else 0.0
+    if expanded is not None:
+        idx, flat, area = expanded
 
-        # A unit spans one cell in the common case (H.264 partitions are <= 16x16 and
-        # aligned to their own size) and up to 16 for a VP9 64x64 superblock.
-        for r in range(u.y // cell, (u.y + u.h - 1) // cell + 1):
-            cy0, cy1 = r * cell, min((r + 1) * cell, frame.height)
-            oh = min(u.y + u.h, cy1) - max(u.y, cy0)
-            if oh <= 0:
-                continue
-            for c in range(u.x // cell, (u.x + u.w - 1) // cell + 1):
-                cx0, cx1 = c * cell, min((c + 1) * cell, frame.width)
-                ow = min(u.x + u.w, cx1) - max(u.x, cx0)
-                if ow <= 0:
-                    continue
-                a = float(ow * oh)
-                area_tot[r, c] += a
-                count[r, c] += 1.0
-                geom.add(r, c, a, (log2_area,))
-                log2_min[r, c] = min(log2_min[r, c], log2_area)
-                if u.geometry_observed:
-                    observed_a[r, c] += a
-                if u.kind is UnitKind.INTER:
-                    inter_a[r, c] += a
-                elif u.kind is None:
-                    unknown_a[r, c] += a
-                if is_bipred:
-                    bipred_a[r, c] += a
-                if u.qp is not None:
-                    qp.add(r, c, a, (float(u.qp),))
-                for m in u.mvs:
-                    acc = l1 if m.list_idx else l0
-                    acc.add(r, c, a, (m.dx, m.dy, math.hypot(m.dx, m.dy)))
+        def acc(vals: np.ndarray) -> np.ndarray:
+            return np.bincount(flat, weights=area * vals[idx], minlength=ncell)
 
-    feats = np.zeros((rows, cols, D), dtype=np.float32)
-    denom = np.maximum(area_tot, 1e-12)
+        area_tot = np.bincount(flat, weights=area, minlength=ncell)
+        denom = np.maximum(area_tot, 1e-12)
+        inter_a = acc(a["inter"])
+        unknown_a = acc(a["unknown"])
 
-    for acc, tag in ((l0, "l0"), (l1, "l1")):
-        mean, std = acc.mean_std()
-        feats[..., _IDX[f"{tag}_dx_mean"]] = mean[..., 0]
-        feats[..., _IDX[f"{tag}_dy_mean"]] = mean[..., 1]
-        feats[..., _IDX[f"{tag}_dx_std"]] = std[..., 0]
-        feats[..., _IDX[f"{tag}_dy_std"]] = std[..., 1]
-        feats[..., _IDX[f"{tag}_mag_mean"]] = mean[..., 2]
-        feats[..., _IDX[f"{tag}_frac"]] = np.minimum(acc.w / denom, 1.0)
+        np.minimum.at(log2_min, flat, a["log2a"][idx])
 
-    feats[..., _IDX["bipred_frac"]] = np.minimum(bipred_a / denom, 1.0)
-    feats[..., _IDX["inter_frac"]] = np.minimum(inter_a / denom, 1.0)
-    feats[..., _IDX["observed_frac"]] = np.minimum(observed_a / denom, 1.0)
+        for li, tag in ((0, "l0"), (1, "l1")):
+            m = a["mv"][li]
+            w = acc(m[0])
+            wsafe = np.maximum(w, 1e-12)
+            for j, (mean_name, std_name) in enumerate(
+                    ((f"{tag}_dx_mean", f"{tag}_dx_std"),
+                     (f"{tag}_dy_mean", f"{tag}_dy_std"),
+                     (f"{tag}_mag_mean", None))):
+                mean = acc(m[1 + j]) / wsafe
+                mean = np.where(w == 0, 0.0, mean)
+                feats[:, _IDX[mean_name]] = mean
+                if std_name is not None:
+                    # Clamped: E[x^2] - E[x]^2 goes slightly negative under float
+                    # cancellation when every sample in a cell is identical, which is
+                    # the common case.
+                    var = np.maximum(acc(m[4 + j]) / wsafe - mean * mean, 0.0)
+                    feats[:, _IDX[std_name]] = np.where(w == 0, 0.0, np.sqrt(var))
+            feats[:, _IDX[f"{tag}_frac"]] = np.minimum(w / denom, 1.0)
 
-    gmean, _ = geom.mean_std()
-    feats[..., _IDX["log2_area_mean"]] = gmean[..., 0]
-    feats[..., _IDX["log2_area_min"]] = np.where(np.isinf(log2_min), 0.0, log2_min)
-    feats[..., _IDX["unit_count"]] = count
+        feats[:, _IDX["bipred_frac"]] = np.minimum(acc(a["bipred"]) / denom, 1.0)
+        feats[:, _IDX["inter_frac"]] = np.minimum(inter_a / denom, 1.0)
+        feats[:, _IDX["observed_frac"]] = np.minimum(acc(a["observed"]) / denom, 1.0)
+        feats[:, _IDX["log2_area_mean"]] = acc(a["log2a"]) / denom
+        feats[:, _IDX["unit_count"]] = np.bincount(flat, minlength=ncell)
 
-    qmean, qstd = qp.mean_std()
-    feats[..., _IDX["qp_mean"]] = qmean[..., 0]
-    feats[..., _IDX["qp_std"]] = qstd[..., 0]
-    feats[..., _IDX["qp_frac"]] = np.minimum(qp.w / denom, 1.0)
+        qw = acc(a["qp_has"])
+        qsafe = np.maximum(qw, 1e-12)
+        qmean = np.where(qw == 0, 0.0, acc(a["qp_s"]) / qsafe)
+        qvar = np.maximum(acc(a["qp_ss"]) / qsafe - qmean * qmean, 0.0)
+        feats[:, _IDX["qp_mean"]] = qmean
+        feats[:, _IDX["qp_std"]] = np.where(qw == 0, 0.0, np.sqrt(qvar))
+        feats[:, _IDX["qp_frac"]] = np.minimum(qw / denom, 1.0)
+
+    feats[:, _IDX["log2_area_min"]] = np.where(np.isinf(log2_min), 0.0, log2_min)
 
     # A cell is INTER if any of its area carried motion; INTRA if it carried none and the
     # codec was capable of saying so; UNKNOWN when the geometry came from a codec that
@@ -180,19 +222,23 @@ def frame_features(frame: CodedFrame, cell: int = MACROBLOCK
 
     # Coordinates are normalised to the VISIBLE frame, after clipping. The last row and
     # column are partial where the frame is not a multiple of the cell, so their centres
-    # and sizes are computed from the clipped extent rather than assumed square.
-    coords = np.zeros((rows, cols, 4), dtype=np.float32)
-    for r in range(rows):
-        y0, y1 = r * cell, min((r + 1) * cell, frame.height)
-        for c in range(cols):
-            x0, x1 = c * cell, min((c + 1) * cell, frame.width)
-            coords[r, c] = (
-                (x0 + x1) / 2 / frame.width,
-                (y0 + y1) / 2 / frame.height,
-                (x1 - x0) / frame.width,
-                (y1 - y0) / frame.height,
-            )
-    return feats, kinds, coords
+    # and sizes come from the clipped extent rather than being assumed square.
+    xs = np.arange(cols) * cell
+    ys = np.arange(rows) * cell
+    x1 = np.minimum(xs + cell, frame.width)
+    y1 = np.minimum(ys + cell, frame.height)
+    cxs = (xs + x1) / 2 / frame.width
+    cys = (ys + y1) / 2 / frame.height
+    ws = (x1 - xs) / frame.width
+    hs = (y1 - ys) / frame.height
+    coords = np.empty((rows, cols, 4), dtype=np.float32)
+    coords[..., 0] = cxs[None, :]
+    coords[..., 1] = cys[:, None]
+    coords[..., 2] = ws[None, :]
+    coords[..., 3] = hs[:, None]
+
+    return (feats.reshape(rows, cols, D).astype(np.float32),
+            kinds.reshape(rows, cols), coords)
 
 
 def patchify_grid(frames: list[CodedFrame], *, cell: int = MACROBLOCK,

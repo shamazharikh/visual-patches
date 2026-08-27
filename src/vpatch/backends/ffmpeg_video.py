@@ -11,6 +11,7 @@ than emitting zeros that look like measurements.
 from __future__ import annotations
 
 import math
+from collections import Counter
 from dataclasses import dataclass, replace
 
 import av
@@ -78,18 +79,59 @@ def capability_for(codec: str) -> Capability:
     )
 
 
-def _packet_order(path: str) -> dict[int, int]:
-    """Map presentation timestamp -> decode position.
+def open_container(path: str):
+    """Open a container, converting libav's errors into this library's typed ones.
+
+    A truncated MP4 is the common real-world case and it fails here rather than during
+    decode: the moov atom lives at the end of the file, so losing the tail loses the
+    index and the container will not open at all. Letting PyAV's InvalidDataError escape
+    would make callers catch a dependency's exception type to handle a condition this
+    library has a name for.
+    """
+    try:
+        return av.open(path)
+    except av.error.InvalidDataError as exc:
+        raise CorruptBitstream(f"cannot parse container {path!r}: {exc}") from exc
+    except av.error.FFmpegError as exc:
+        raise CorruptBitstream(f"cannot open {path!r}: {exc}") from exc
+
+
+def _packet_order(path: str) -> tuple[dict[int, list[int]], int]:
+    """Map presentation timestamp -> decode positions, and count the video packets.
 
     Decode order is the packet order by DTS; display order is by PTS. Frame-level
-    ``pkt_dts`` is reported post-reordering and will not show the divergence, so we
-    read it from the packet stream instead.
+    ``pkt_dts`` is reported post-reordering and will not show the divergence, so we read
+    it from the packet stream instead.
+
+    PTS is **not unique** in real streams. A surveillance clip in this corpus opens with
+    two packets both stamped pts=77, and variable-frame-rate camera output does this
+    routinely. So the map is pts -> list of decode ranks, consumed in order, and the
+    packet count is returned separately: deriving it from the size of a pts-keyed dict
+    undercounts by exactly the number of duplicates, which turned a healthy 84-frame clip
+    into a spurious "decoder was not drained" failure.
     """
-    with av.open(path) as container:
+    with open_container(path) as container:
         stream = container.streams.video[0]
         packets = [(p.pts, p.dts) for p in container.demux(stream) if p.size]
-    in_decode_order = sorted(packets, key=lambda pd: (pd[1] is None, pd[1]))
-    return {pts: i for i, (pts, _) in enumerate(in_decode_order) if pts is not None}
+    return rank_packets(packets), len(packets)
+
+
+def rank_packets(packets: list[tuple[int | None, int | None]]) -> dict[int, list[int]]:
+    """pts -> decode ranks, ascending. Pure, so the duplicate cases are testable."""
+    # Index-tiebroken so equal DTS resolves to demux order rather than sort internals.
+    order = sorted(range(len(packets)),
+                   key=lambda i: (packets[i][1] is None, packets[i][1], i))
+    rank_of = [0] * len(packets)
+    for rank, i in enumerate(order):
+        rank_of[i] = rank
+
+    ranks: dict[int, list[int]] = {}
+    for i, (pts, _) in enumerate(packets):
+        if pts is not None:
+            ranks.setdefault(pts, []).append(rank_of[i])
+    for v in ranks.values():
+        v.sort()
+    return ranks
 
 
 def _units_from_mvs(arr: np.ndarray, width: int, height: int, qp_map: np.ndarray | None
@@ -205,7 +247,7 @@ class VideoExtractor:
 
     def capability(self, *, probe_frames: int = 0) -> Capability:
         """Declared capability; with probe_frames > 0, trial-decode to confirm it."""
-        with av.open(self.path) as container:
+        with open_container(self.path) as container:
             cap = capability_for(container.streams.video[0].codec_context.name)
         if not probe_frames:
             return cap
@@ -218,10 +260,12 @@ class VideoExtractor:
         return replace(cap, observed=found)
 
     def extract(self) -> list[CodedFrame]:
-        decode_pos = _packet_order(self.path)
-        n_packets = len(decode_pos)
+        decode_ranks, n_packets = _packet_order(self.path)
+        # Frames arrive from the decoder in display order; each one claims the next
+        # unused decode rank for its PTS, so duplicate timestamps stay distinguishable.
+        claimed: Counter[int] = Counter()
 
-        with av.open(self.path) as container:
+        with open_container(self.path) as container:
             stream = container.streams.video[0]
             ctx = stream.codec_context
             codec = ctx.name
@@ -255,7 +299,7 @@ class VideoExtractor:
                         "(my *= 2) exists only in the IS_16X8/IS_8X16 branches, so 16x16 and "
                         "8x8 macroblocks would carry half-magnitude vertical motion"
                     )
-                frames.append(self._build(frame, cap, decode_pos))
+                frames.append(self._build(frame, cap, decode_ranks, claimed))
                 if self.max_frames and len(frames) >= self.max_frames:
                     break
 
@@ -269,7 +313,8 @@ class VideoExtractor:
             frame.display_index = display_index
         return frames
 
-    def _build(self, frame, cap: Capability, decode_pos: dict[int, int]) -> CodedFrame:
+    def _build(self, frame, cap: Capability, decode_ranks: dict[int, list[int]],
+               claimed: Counter[int]) -> CodedFrame:
         w, h = frame.width, frame.height
         corrupt = bool(getattr(frame, "is_corrupt", False))
         if corrupt and self.strict:
@@ -315,8 +360,23 @@ class VideoExtractor:
             )
         canonical_sort(units)
 
+        # A frame whose PTS matches no packet, or a second frame claiming a PTS that
+        # only one packet carried, has no recoverable decode position. That is reported
+        # as ambiguous rather than silently handed a -1 that reads like an index.
+        ranks = decode_ranks.get(frame.pts) if frame.pts is not None else None
+        seq = claimed[frame.pts] if frame.pts is not None else 0
+        if ranks is not None and seq < len(ranks):
+            decode_index = ranks[seq]
+            ambiguous = len(ranks) > 1
+        else:
+            decode_index = -1
+            ambiguous = True
+        if frame.pts is not None:
+            claimed[frame.pts] += 1
+
         return CodedFrame(
-            decode_index=decode_pos.get(frame.pts, -1),
+            decode_index=decode_index,
+            order_ambiguous=ambiguous,
             display_index=frame.pts if frame.pts is not None else 0,
             pict_type=pict,
             key_frame=bool(frame.key_frame),

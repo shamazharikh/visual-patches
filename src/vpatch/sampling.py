@@ -47,6 +47,11 @@ class DropReport:
     cells_never_kept: int = 0
     anchors: list[int] = field(default_factory=list)
     budget_below_anchor_floor: bool = False
+    # True when the bundle carried no motion measurement anywhere, so "changed" could
+    # never be true and only anchors survived. The kept fraction then looks like a large
+    # compression win (0.017 on a 60-frame HEVC clip) while carrying no temporal
+    # information at all -- the degraded tier producing an empty result, not a good one.
+    no_change_signal: bool = False
 
     @property
     def total(self) -> int:
@@ -95,6 +100,19 @@ def salience(bundle: PatchBundle, *, qp_weight: float = 0.0) -> np.ndarray:
         score = score + qp_weight * f[:, idx["qp_mean"]]
     # A cell built from grid fill was never measured; rank it below anything that was.
     return score * f[:, idx["observed_frac"]]
+
+
+def _has_motion_signal(bundle: PatchBundle) -> bool:
+    """Was motion measured anywhere in this bundle?
+
+    Read from the validity fractions rather than the motion values: a clip that is
+    genuinely motionless has l0_frac=1 with zero displacement, while a codec that exports
+    no motion at all has l0_frac=0. Those must not be confused -- the first is a
+    measurement, the second is its absence.
+    """
+    idx = {n: i for i, n in enumerate(bundle.meta["feature_layout"])}
+    return bool(bundle.features[:, idx["l0_frac"]].any()
+                or bundle.features[:, idx["l1_frac"]].any())
 
 
 def _cell_id(bundle: PatchBundle) -> np.ndarray:
@@ -151,6 +169,7 @@ def _finish(bundle: PatchBundle, keep: np.ndarray, policy: str,
         cells_never_kept=n_cells - len(kept_cells),
         anchors=list(anchors),
         budget_below_anchor_floor=budget_below_anchor_floor,
+        no_change_signal=not _has_motion_signal(bundle),
     )
     return _apply(bundle, keep, report), report
 
@@ -279,6 +298,7 @@ def prune(bundle: PatchBundle, *, anchors: list[int], max_tokens: int | None = N
         cells_never_kept=rep2.cells_never_kept,
         anchors=anchors,
         budget_below_anchor_floor=rep2.budget_below_anchor_floor,
+        no_change_signal=rep.no_change_signal,
     )
     out2.meta = {**out2.meta, "drop_report": asdict(merged)}
     return out2, merged

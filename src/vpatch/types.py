@@ -107,6 +107,11 @@ class CodedFrame:
     coverage: float = 0.0  # from a rasterised occupancy mask, never a sum of areas
     qp_map: np.ndarray | None = None  # (mb_h, mb_w) int32, absolute QP per macroblock
     concealed: bool = False
+    # True when this frame's position in decode order could not be established: PTS is
+    # not unique in real streams (variable-frame-rate cameras restamp, and clips in the
+    # wild open with two packets sharing a timestamp), so `decode_index` is a best effort
+    # and this flag says when to distrust it.
+    order_ambiguous: bool = False
     pixels: np.ndarray | None = None  # luma plane, (h, w)
 
     @property

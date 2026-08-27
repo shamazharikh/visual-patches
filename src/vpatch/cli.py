@@ -17,7 +17,11 @@ import sys
 import av
 import numpy as np
 
-from vpatch.backends.ffmpeg_video import VideoExtractor, max_units_per_frame
+from vpatch.backends.ffmpeg_video import (
+    VideoExtractor,
+    max_units_per_frame,
+    open_container,
+)
 from vpatch.partition import MACROBLOCK, grid_shape
 from vpatch.patchify import FEATURE_LAYOUT, patchify_grid
 from vpatch.sampling import anchor_delta, budget, keyframe_anchors
@@ -32,7 +36,7 @@ BASELINE_TEMPORAL_MERGE = 2
 
 
 def _probe_container(path: str) -> dict:
-    with av.open(path) as container:
+    with open_container(path) as container:
         st = container.streams.video[0]
         rate = st.average_rate or st.guessed_rate
         fps = float(rate) if rate else 0.0
@@ -159,6 +163,12 @@ def cmd_stats(args: argparse.Namespace) -> int:
           f"frames left empty: {report.frames_emptied}")
     for rule, count in sorted(report.by_rule.items(), key=lambda kv: -kv[1]):
         print(f"    {rule:<28} {count:>8}")
+    if report.no_change_signal:
+        print(f"  WARNING: {cap.codec} exported no motion anywhere in this clip, so no "
+              "cell could")
+        print("  ever count as changed and only anchor frames survived. The kept "
+              "fraction above")
+        print("  is an empty result, not a compression win.")
     if capped is not None and cap_report.budget_below_anchor_floor:
         print("  WARNING: token cap is below the anchor floor; anchors were dropped and")
         print("  the 'absence means unchanged' contract no longer holds.")
