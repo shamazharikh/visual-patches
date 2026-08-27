@@ -9,8 +9,16 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "av>=18.1.0",
-    "numpy>=2.5.2",
+    # Floor kept low deliberately: vLLM pins numba==0.65.0, which caps numpy below
+    # 2.5, so a 2.5 floor makes the documented `vpatch[vllm]` install unsatisfiable.
+    # Nothing here needs a recent numpy -- bincount, lexsort and minimum.at are ancient.
+    "numpy>=1.26",
 ]
+
+[project.optional-dependencies]
+# Unused by the runtime package -- vpatch never imports vllm (see tests/test_export.py).
+# Present so `pip install vpatch[vllm]` provisions a version the documented seam matches.
+vllm = ["vllm>=0.28.0"]
 
 [project.scripts]
 vpatch = "vpatch.cli:main"
