@@ -95,3 +95,49 @@ def test_visualizer_produces_a_self_contained_page(h264, tmp_path):
     embedded = re.search(r"data:image/jpeg;base64,([A-Za-z0-9+/=]+)", doc).group(1)
     import base64
     assert base64.b64decode(embedded)[:3] == b"\xff\xd8\xff"  # JPEG magic
+
+
+def test_clip_visualizer_measures_the_tree_against_a_real_motion_reference(
+        vp9_pan, pan, h264, tmp_path):
+    """The comparison is the page's claim, so both halves must stay wired.
+
+    `--compare` is what turns an overlay into a measurement: without a codec that
+    exports motion there is nothing to test VP9's partition tree against. `pan` is a
+    known-displacement shot, so its moving-area trace is high and near-constant, which
+    is enough to pin that the reference is aligned rather than merely present.
+    """
+    import base64
+    import re
+    import sys
+
+    sys.path.insert(0, "tools")
+    from visualize_clip import build, motion_reference
+
+    out = tmp_path / "clip.html"
+    build(vp9_pan, str(out), cell=16, fps=None, crf=32, compare=pan)
+    doc = out.read_text()
+
+    assert "data:video/mp4;base64," in doc
+    assert "http://" not in doc.replace("http://www.w3.org/2000/svg", "")
+    raw = base64.b64decode(
+        re.search(r"data:video/mp4;base64,([A-Za-z0-9+/=]+)", doc).group(1))
+    assert raw[4:8] == b"ftyp"  # ISO base media magic
+    # The comparison panels only exist when the reference actually lined up.
+    assert "Where H.264 puts its vectors" in doc
+
+    n = sum(1 for _ in re.finditer(r"<figure>", doc))
+    assert n == 9
+
+    acc, trace, sad, keys = motion_reference(pan, 16, 320, 240, 50)
+    assert acc.shape == (15, 20)
+    assert len(trace) == len(sad) == 50
+    # A 4px/frame pan moves nearly the whole frame on every predicted frame. The floor
+    # is loose because the frame after a keyframe predicts from a fresh reference and
+    # picks up fewer >=1px blocks; the median is the figure that pins alignment.
+    import numpy as np
+    moving = trace[[i for i in range(50) if i not in keys]]
+    assert moving.min() > 0.5
+    assert np.median(moving) > 0.85
+
+    # Mismatched geometry must yield no reference rather than a silent misalignment.
+    assert motion_reference(h264, 16, 999, 999, 3) is None

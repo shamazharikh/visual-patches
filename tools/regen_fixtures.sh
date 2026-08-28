@@ -2,6 +2,12 @@
 # Maintainer-only. Fixtures are COMMITTED, not generated at test time: libx264 output
 # depends on host thread count, so generating per-run makes every numeric assertion flake
 # on a machine with a different core count. -threads 1 pins it.
+#
+# Caveat for .webm: the Matroska muxer writes a random SegmentUID on every run, which
+# +bitexact does not suppress, so re-running this script rewrites every webm to the same
+# byte LENGTH but a different hash. Restore any webm you did not mean to change before
+# refreshing SHA256SUMS, or the diff will claim fixtures moved when only the container
+# header did.
 set -euo pipefail
 cd "$(dirname "$0")/../tests/assets"
 FF=${FFMPEG:-ffmpeg}
@@ -13,6 +19,12 @@ $FF -y -v error -f lavfi -i testsrc2=size=320x240:rate=25 -t 2 \
 # and sign are assertable by exact equality instead of a PSNR threshold.
 $FF -y -v error -f lavfi -i testsrc2=size=640x480:rate=25 -t 2 \
     -vf "crop=320:240:x='4*n':y=0" -c:v libx264 -bf 0 -refs 1 -g 40 -qp 18 -threads 1 pan.mp4
+# The same pan re-encoded as VP9, so the clip visualiser's --compare path has a shot
+# available in both a partition-only codec and an MV-capable one. Comparing the tree
+# against motion needs identical content at identical geometry and frame count; without
+# a paired fixture that path is only ever exercised on its refusal case.
+$FF -y -v error -i pan.mp4 -c:v libvpx-vp9 -b:v 600k -aq-mode 1 -row-mt 1 -threads 1 \
+    -deadline good -cpu-used 4 -g 40 vp9_pan.webm
 # Non-multiple-of-16 size: exercises macroblock padding overshoot and clipping.
 $FF -y -v error -f lavfi -i testsrc2=size=250x170:rate=25 -t 1 \
     -c:v libx264 -bf 2 -g 12 -threads 1 odd_250x170.mp4
@@ -30,7 +42,6 @@ $FF -y -v error -loop 1 -i still.png -f lavfi -i "color=c=white:s=16x16:r=25" \
     -filter_complex "[0:v]fps=25[bg];[bg][1:v]overlay=x='40+2*n':y=112:shortest=0" \
     -t 2 -c:v libx264 -bf 2 -g 12 -threads 1 -pix_fmt yuv420p static_box.mp4
 rm -f still.png
-sha256sum *.mp4 > SHA256SUMS
 $FF -version | head -1 >  VERSIONS
 $FF -hide_banner -h encoder=libx264 2>/dev/null | head -1 >> VERSIONS
 # VP9 partition tree. -aq-mode 1 enables segmentation, which is what gates block export;

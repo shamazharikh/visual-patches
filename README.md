@@ -87,6 +87,42 @@ answer is *no data*.
 - **Extraction is a pure function of (file bytes, kwargs)**, byte-identical across
   processes and thread counts.
 
+## Looking at it
+
+Two renderers, both writing one self-contained HTML file with everything embedded:
+
+```bash
+uv run python tools/visualize.py CLIP.mp4 -o panels.html          # one frame, every channel
+uv run python tools/visualize_clip.py CLIP.webm -o clip.html \
+    --compare ORIGINAL.mp4                                        # every frame, one channel
+```
+
+`visualize.py` freezes a frame and draws partitions, motion, QP, the aggregated grid
+tokens and the pruning mask over it. `visualize_clip.py` is the other axis — it re-encodes
+the partition overlay as a video so a whole clip plays, and adds per-frame traces. It is
+aimed at VP9, whose only contribution is a quadtree, and a quadtree says nothing until you
+watch it move.
+
+`--compare` takes an MV-capable encode of the *same shot* and turns the page into a
+measurement. On real surveillance (a 720p stairwell camera, 106 frames, transcoded to VP9
+at `-aq-mode 1`) it reports:
+
+| | r |
+|---|---|
+| H.264 moving area vs. mean \|pixel delta\| | **+0.98** |
+| VP9 partition count vs. mean \|pixel delta\| | +0.33 |
+| VP9 partition count vs. H.264 moving area | +0.29 |
+| VP9 split map vs. H.264 vector map, per cell | **−0.01** |
+
+So the motion channel is an almost exact meter of *how much* a frame changed while
+saying little about *where* — on that clip its vectors are speckle over textured wall,
+on frames that are visually identical. The partition tree is a poor stand-in for it: it
+traces structural edges, which is a different question. Two other things that clip
+showed and the synthetic fixtures did not: libvpx at `-aq-mode 1` emits a **single**
+`q_idx` for every unit on 95 of 106 frames (the fixture has 17 distinct values), and
+VP9's rectangular partitions (`64x16`, `32x16`, …) do occur in the wild, at about 0.13%
+of blocks.
+
 ## vLLM
 
 Documentation, not a plugin — see [docs/vllm-integration.md](docs/vllm-integration.md).

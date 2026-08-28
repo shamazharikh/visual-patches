@@ -36,6 +36,13 @@ def vp9():
 
 
 @pytest.fixture(scope="session")
+def vp9_pan():
+    """The `pan` shot re-encoded as VP9: same content, one codec with partitions and no
+    motion, one with motion and no tree. The only fixture pair that can be compared."""
+    return str(ASSETS / "vp9_pan.webm")
+
+
+@pytest.fixture(scope="session")
 def vp9_noaq():
     return str(ASSETS / "vp9_noaq.webm")
 
