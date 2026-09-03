@@ -4,12 +4,12 @@
     uv run python tools/visualize.py CLIP.mp4 -o out.html [--frame N] [--cell 16]
     uv run python tools/visualize.py PHOTO.jpg -o out.html
 
-Eight panels over the same frame: the decoded picture, the encoder's own partition
-geometry, its motion field, its per-macroblock and per-unit QP, the aggregated grid
-tokens, and which of those tokens survive anchored pruning. The point is to make the
-claims checkable by eye -- block sizes really are only four, motion really does
-concentrate where things move, and the variance channel really does light up where a
-mean would not.
+Nine panels over the same frame: the decoded picture, the encoder's own partition
+geometry, patches grouped by similarity, its motion field, its per-macroblock and
+per-unit QP, the aggregated grid tokens, and which of those tokens survive anchored
+pruning. The point is to make the claims checkable by eye -- block sizes really are
+only four, motion really does concentrate where things move, and the variance channel
+really does light up where a mean would not.
 
 A panel with nothing behind it is drawn as an explicit empty card naming the reason,
 never as a blank overlay with a caption implying data. Two reasons are distinguished,
@@ -209,6 +209,69 @@ def panel_kept(kept_mask, rows, cols, cell, w, h) -> str:
     return "".join(parts)
 
 
+def group_quadtree(luma: np.ndarray, max_cell: int = 64, min_cell: int = 8,
+                   tolerance: float = 6.0) -> list[tuple[int, int, int, int]]:
+    """Merge visually similar neighbours into one patch, as a quadtree over the picture.
+
+    This is the ONLY thing on the page derived from decoded pixels rather than from the
+    bitstream, and it exists because a still exports nothing to derive it from. A
+    photograph has no temporal redundancy to prune -- there is no previous frame -- but
+    it has plenty of spatial redundancy, and a flat stretch of sky does not need one
+    token per 28 pixels any more than a video needs a token for a cell that did not
+    move.
+
+    The structure is a quadtree rather than region-growing on purpose: it is the same
+    shape VP9 would have exported had this picture been a video frame, so the result
+    lands on the grid the rest of this library already speaks, and every leaf is still a
+    rectangle a patch encoder can consume. A node stops splitting when its luma standard
+    deviation is within `tolerance`, which is a homogeneity test, not an edge detector:
+    it keeps detail exactly where detail varies.
+
+    Uses summed-area tables so each node's variance costs O(1) regardless of its size --
+    a 3840x2560 frame is otherwise 10M pixel reads per tree level.
+    """
+    a = luma.astype(np.float64)
+    ii = np.pad(a.cumsum(0).cumsum(1), ((1, 0), (1, 0)))
+    ii2 = np.pad((a * a).cumsum(0).cumsum(1), ((1, 0), (1, 0)))
+    h, w = luma.shape
+
+    def stats(x0, y0, x1, y1):
+        n = (x1 - x0) * (y1 - y0)
+        total = ii[y1, x1] - ii[y0, x1] - ii[y1, x0] + ii[y0, x0]
+        sq = ii2[y1, x1] - ii2[y0, x1] - ii2[y1, x0] + ii2[y0, x0]
+        # Clamped: floating-point cancellation on a perfectly flat block can land a
+        # hair below zero, and sqrt of that is nan, which would split forever.
+        return math.sqrt(max(sq / n - (total / n) ** 2, 0.0))
+
+    leaves: list[tuple[int, int, int, int]] = []
+    stack = [(x, y, max_cell)
+             for y in range(0, h, max_cell) for x in range(0, w, max_cell)]
+    while stack:
+        x, y, size = stack.pop()
+        x1, y1 = min(x + size, w), min(y + size, h)
+        if x1 <= x or y1 <= y:
+            continue
+        if size <= min_cell or stats(x, y, x1, y1) <= tolerance:
+            leaves.append((x, y, x1 - x, y1 - y))
+            continue
+        half = size // 2
+        stack += [(x, y, half), (x + half, y, half),
+                  (x, y + half, half), (x + half, y + half, half)]
+    return leaves
+
+
+def panel_groups(leaves, w: int, h: int) -> str:
+    """One rectangle per merged patch, coloured by size on the same key as partitions."""
+    parts = []
+    for x, y, bw, bh in leaves:
+        colour = SHAPE_COLOURS.get((bw, bh), FILL_COLOUR)
+        parts.append(
+            f'<rect x="{x}" y="{y}" width="{bw}" height="{bh}" fill="none" '
+            f'stroke="{colour}" stroke-width="0.9" opacity="0.9"/>'
+        )
+    return "".join(parts)
+
+
 def _empty(w: int, h: int, reason: str) -> str:
     """A panel with no data behind it, drawn so it cannot be mistaken for a null result.
 
@@ -231,7 +294,8 @@ def _empty(w: int, h: int, reason: str) -> str:
             f'{html.escape(reason)}</text></svg>')
 
 
-def build(path: str, out: str, frame_index: int | None, cell: int) -> str:
+def build(path: str, out: str, frame_index: int | None, cell: int,
+          group_tolerance: float = 8.0, group_max: int | None = None) -> str:
     ex = VideoExtractor(path, pixels=True, max_frames=64)
     cap = ex.capability()
     frames = ex.extract()
@@ -264,6 +328,15 @@ def build(path: str, out: str, frame_index: int | None, cell: int) -> str:
     sd = np.maximum(np.hypot(f[:, IDX["l0_dx_std"]], f[:, IDX["l0_dy_std"]]),
                     np.hypot(f[:, IDX["l1_dx_std"]], f[:, IDX["l1_dy_std"]]))
     kept = ((sp >= 0.5) | (sd >= 0.5) | (frame_index in anchors)).reshape(rows, cols)
+
+    # Grouping runs at or above the token grid: a merged patch finer than one token
+    # cannot remove a token, it only subdivides one. The floor is the next power of two
+    # at or above `cell`, which is what the quadtree needs to halve cleanly.
+    group_min = 1 << max(0, (cell - 1).bit_length())
+    group_top = group_max if group_max else group_min * 8
+    leaves = (group_quadtree(frame.pixels, max_cell=group_top, min_cell=group_min,
+                             tolerance=group_tolerance)
+              if group_tolerance > 0 else [])
 
     img = _jpeg_data_uri(frame.pixels)
     observed = [u for u in frame.units if u.geometry_observed]
@@ -310,6 +383,20 @@ def build(path: str, out: str, frame_index: int | None, cell: int) -> str:
         ("Coding units the encoder chose" if observed else "Coding units - none exported",
          units_sub,
          _svg(w, h, panel_partitions(frame), img, dim=0.55)),
+        ("Patches grouped by similarity",
+         (f"{len(leaves):,} patches from {group_min}px to {group_top}px replace the "
+          f"{rows * cols:,} uniform tokens -- {len(leaves) / (rows * cols):.2f}x -- by "
+          f"merging neighbours whose luma varies by less than {group_tolerance:g}. "
+          f"This is the one panel on the page computed from the decoded picture "
+          f"rather than read out of the bitstream"
+          + (", because a still exports nothing to read"
+             if not observed else
+             " -- compare it with the encoder's own tree above, which answers a "
+             "different question: where prediction failed, not where the picture "
+             "is uniform")
+          if leaves else "grouping disabled (--group-tolerance 0)"),
+         _svg(w, h, panel_groups(leaves, w, h), img, dim=0.55) if leaves
+         else _empty(w, h, "grouping disabled")),
         ("Motion field",
          (f"{len(mv_units)} units carry motion, peak {max_speed:.1f}px; arrows drawn 3x"
           if has_motion else no_motion),
@@ -420,8 +507,14 @@ def main() -> int:
                     help="display index; default picks the frame with the most motion, "
                          "or frame 0 for a still or a codec that exports no motion")
     ap.add_argument("--cell", type=int, default=16)
+    ap.add_argument("--group-tolerance", type=float, default=8.0,
+                    help="luma standard deviation below which neighbouring patches are "
+                         "merged into one; 0 disables grouping")
+    ap.add_argument("--group-max", type=int, default=None,
+                    help="largest merged patch, in pixels (default: 8x the grid cell)")
     args = ap.parse_args()
-    print(build(args.path, args.out, args.frame, args.cell))
+    print(build(args.path, args.out, args.frame, args.cell,
+                args.group_tolerance, args.group_max))
     return 0
 
 

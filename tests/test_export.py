@@ -88,7 +88,7 @@ def test_visualizer_produces_a_self_contained_page(h264, tmp_path):
     # Self-contained: the picture is embedded, nothing is fetched.
     assert "data:image/jpeg;base64," in doc
     assert "http://" not in doc.replace("http://www.w3.org/2000/svg", "")
-    assert doc.count("<figure>") == 8
+    assert doc.count("<figure>") == 9
     # Overlays actually drew something.
     assert doc.count("<rect") > 100
     assert "<line" in doc
@@ -115,7 +115,7 @@ def test_visualizer_on_a_still_reports_absence_instead_of_zero(still_jpeg, tmp_p
     build(still_jpeg, str(out), frame_index=None, cell=16)
     doc = out.read_text()
 
-    assert doc.count("<figure>") == 8
+    assert doc.count("<figure>") == 9
     # Six of the eight panels are absent, not empty: three motion panels, pruning, and
     # both QP panels -- JPEG exports no quantiser either. Only the picture and the
     # synthesised grid remain.
@@ -174,3 +174,54 @@ def test_clip_visualizer_measures_the_tree_against_a_real_motion_reference(
 
     # Mismatched geometry must yield no reference rather than a silent misalignment.
     assert motion_reference(h264, 16, 999, 999, 3) is None
+
+
+def _group():
+    import sys
+    sys.path.insert(0, "tools")
+    from visualize import group_quadtree
+    return group_quadtree
+
+
+def test_similarity_grouping_tiles_the_frame_exactly(still_jpeg):
+    """Every pixel in exactly one patch.
+
+    The panel's whole claim is a token count, and a grouping that overlapped or left
+    gaps would report a smaller number while covering less picture. Overlap is the
+    dangerous direction: it reads as a saving.
+    """
+    import numpy as np
+
+    from vpatch.backends.ffmpeg_video import VideoExtractor
+
+    luma = VideoExtractor(still_jpeg, pixels=True, max_frames=1).extract()[0].pixels
+    cover = np.zeros(luma.shape, dtype=np.int32)
+    for x, y, w, h in _group()(luma, max_cell=128, min_cell=16, tolerance=8.0):
+        cover[y:y + h, x:x + w] += 1
+    assert cover.min() == 1 and cover.max() == 1
+
+
+def test_similarity_grouping_merges_more_as_tolerance_rises(still_jpeg):
+    """Monotone in tolerance, and never coarser than one patch or finer than the grid."""
+    from vpatch.backends.ffmpeg_video import VideoExtractor
+
+    luma = VideoExtractor(still_jpeg, pixels=True, max_frames=1).extract()[0].pixels
+    counts = [len(_group()(luma, max_cell=128, min_cell=16, tolerance=t))
+              for t in (0.0, 4.0, 12.0, 40.0)]
+    assert counts == sorted(counts, reverse=True), counts
+    assert counts[-1] < counts[0], "a large tolerance must actually merge something"
+
+
+def test_a_flat_image_collapses_to_one_patch_per_root():
+    """The degenerate case pins the top of the tree: nothing varies, so nothing splits."""
+    import numpy as np
+
+    flat = np.full((256, 256), 128, dtype=np.uint8)
+    leaves = _group()(flat, max_cell=64, min_cell=8, tolerance=1.0)
+    assert len(leaves) == 16                     # 256/64 squared, no split anywhere
+    assert {(w, h) for _, _, w, h in leaves} == {(64, 64)}
+
+    # One pixel of contrast is enough to split its own root and no other.
+    poked = flat.copy()
+    poked[10, 10] = 255
+    assert len(_group()(poked, max_cell=64, min_cell=8, tolerance=1.0)) > 16
