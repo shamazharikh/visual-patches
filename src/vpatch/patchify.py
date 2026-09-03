@@ -110,9 +110,9 @@ def _unit_arrays(units, cell, width, height):
             mv[li, 6, i] += mag * mag
         bipred[i] = 1.0 if len(lists) > 1 else 0.0
 
-    return dict(x=ux, y=uy, w=uw, h=uh, log2a=log2a, observed=observed, inter=inter,
-                unknown=unknown, bipred=bipred, qp_has=qp_has, qp_s=qp_s, qp_ss=qp_ss,
-                mv=mv)
+    return {"x": ux, "y": uy, "w": uw, "h": uh, "log2a": log2a, "observed": observed,
+            "inter": inter, "unknown": unknown, "bipred": bipred, "qp_has": qp_has,
+            "qp_s": qp_s, "qp_ss": qp_ss, "mv": mv}
 
 
 def _pairs(a, cell, width, height, cols):

@@ -150,8 +150,8 @@ def cmd_stats(args: argparse.Namespace) -> int:
     print()
     print(f"  {'variant':<34} {'tok/s':>10} {'vs baseline':>12}")
     print(f"  {'-' * 34} {'-' * 10:>10} {'-' * 12:>12}")
-    print(f"  {'BASELINE 28px patch @%gfps' % args.baseline_fps:<34} {baseline:10.1f} "
-          f"{1.0:11.2f}x")
+    label = f"BASELINE 28px patch @{args.baseline_fps:g}fps"
+    print(f"  {label:<34} {baseline:10.1f} {1.0:11.2f}x")
     for name, tps in variants:
         if tps is None:
             print(f"  {name:<34} {'n/a':>10} {'':>12}   ({cap.codec} exports no motion)")
@@ -181,7 +181,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
             "baseline_tokens_per_s": baseline,
             "motion_vectors_available": cap.motion_vectors,
             "drop_report": pruned.meta["drop_report"],
-            "variants": {name: tps for name, tps in variants},
+            "variants": dict(variants),
             "ratios": {name: (None if tps is None else tps / baseline)
                        for name, tps in variants},
         }, indent=2))

@@ -30,4 +30,22 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "ruff>=0.14.0",
 ]
+
+[tool.ruff]
+# The codebase already sits under 100; three strays were pulled in when this was adopted.
+line-length = 100
+
+[tool.ruff.lint]
+# Chosen, not inherited. An unconfigured `ruff check` turns on ~830 rules, and a warning
+# nobody chose is a warning nobody reads. These are the families that caught real defects
+# here -- dead imports and variables, unsorted imports, a shebang without an exec bit,
+# implicit concatenation inside a collection (the missing-comma trap) -- plus the modern
+# -syntax and bugbear rules that keep new code consistent with the old.
+select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM", "ISC", "RUF", "EXE"]
+
+[tool.ruff.lint.per-file-ignores]
+# Fixture bytes are read and truncated deliberately to build corrupt inputs; the
+# assertions are about what the decoder does with them, not about handle hygiene.
+"tests/*" = ["SIM115"]

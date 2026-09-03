@@ -77,10 +77,10 @@ def _is_mutated(tree: ast.Module, name: str) -> bool:
                 if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) \
                         and t.value.id == name:
                     return True
-        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
-                and isinstance(node.func.value, ast.Name) and node.func.value.id == name:
-            if node.func.attr in {"update", "setdefault", "pop", "clear"}:
-                return True
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name) and node.func.value.id == name
+                and node.func.attr in {"update", "setdefault", "pop", "clear"}):
+            return True
     return assigns != 1
 
 

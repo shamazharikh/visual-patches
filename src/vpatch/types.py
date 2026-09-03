@@ -8,7 +8,7 @@ codec cannot supply are `None` or carry an explicit `*_available` flag in
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, StrEnum
 
 import numpy as np
 
@@ -33,7 +33,7 @@ class UnitKind(Enum):
     # kind=None rather than a guessed label.
 
 
-class Modality(str, Enum):
+class Modality(StrEnum):
     VIDEO = "video.v1"
     IMAGE = "image.v1"
 

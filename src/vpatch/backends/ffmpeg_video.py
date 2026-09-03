@@ -376,9 +376,10 @@ class VideoExtractor:
         mv = frame.side_data.get("MOTION_VECTORS") if cap.motion_vectors else None
         if mv is not None:
             arr = mv.to_ndarray()
-            shapes = set(zip(arr["w"].tolist(), arr["h"].tolist()))
+            shapes = set(zip(arr["w"].tolist(), arr["h"].tolist(), strict=True))
             if not shapes <= _VALID_SHAPES:
-                raise UnsupportedCodecFeature(f"unexpected MV block shapes: {shapes - _VALID_SHAPES}")
+                raise UnsupportedCodecFeature(
+                    f"unexpected MV block shapes: {shapes - _VALID_SHAPES}")
             units, occupancy = _units_from_mvs(arr, w, h, qp_map)
 
         pict = _PICT_TYPE.get(int(frame.pict_type), str(frame.pict_type))

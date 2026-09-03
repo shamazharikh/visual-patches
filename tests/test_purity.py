@@ -24,7 +24,9 @@ SCRIPT = textwrap.dedent("""
         h.update(np.ascontiguousarray(f.qp_map).tobytes() if f.qp_map is not None else b"-")
         h.update(np.ascontiguousarray(f.pixels).tobytes() if f.pixels is not None else b"-")
         for u in f.units:
-            h.update(f"{u.x},{u.y},{u.w},{u.h},{u.kind.value if u.kind else "-"},{u.geometry_observed},{u.qp}".encode())
+            kind = u.kind.value if u.kind else "-"
+            h.update(
+                f"{u.x},{u.y},{u.w},{u.h},{kind},{u.geometry_observed},{u.qp}".encode())
             for m in u.mvs:
                 h.update(f"{m.dx!r},{m.dy!r},{m.list_idx}".encode())
     print(h.hexdigest())

@@ -4,6 +4,8 @@ The theme: an input this library cannot describe honestly must produce a named e
 or an explicit "not available", never a plausible-looking number.
 """
 
+import itertools
+
 import numpy as np
 import pytest
 
@@ -72,7 +74,7 @@ def test_the_interlaced_fixture_would_otherwise_produce_motion(interlaced):
         stream = container.streams.video[0]
         stream.codec_context.flags2 |= Flags2.export_mvs
         stream.codec_context.options = {"export_side_data": "mvs+venc_params"}
-        frames = [f for _, f in zip(range(6), container.decode(stream))]
+        frames = list(itertools.islice(container.decode(stream), 6))
     assert all(f.interlaced_frame for f in frames)
     assert sum(f.side_data.get("MOTION_VECTORS") is not None for f in frames) > 0
 

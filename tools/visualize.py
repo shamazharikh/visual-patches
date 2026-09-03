@@ -6,9 +6,10 @@
 
 Eight panels over the same frame: the decoded picture, the encoder's own partition
 geometry, its motion field, its per-macroblock and per-unit QP, the aggregated grid
-tokens, and which of those tokens survive anchored pruning. The point is to make the claims checkable by
-eye -- block sizes really are only four, motion really does concentrate where things
-move, and the variance channel really does light up where a mean would not.
+tokens, and which of those tokens survive anchored pruning. The point is to make the
+claims checkable by eye -- block sizes really are only four, motion really does
+concentrate where things move, and the variance channel really does light up where a
+mean would not.
 
 A panel with nothing behind it is drawn as an explicit empty card naming the reason,
 never as a blank overlay with a caption implying data. Two reasons are distinguished,

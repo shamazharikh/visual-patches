@@ -39,7 +39,7 @@ def test_block_shapes_are_the_only_four(h264):
     """ffmpeg's add_mb() hard-codes w,h in {8,16}. Structural, not exact counts."""
     shapes = set()
     for a in raw_records(h264):
-        shapes |= set(zip(a["w"].tolist(), a["h"].tolist()))
+        shapes |= set(zip(a["w"].tolist(), a["h"].tolist(), strict=True))
     assert shapes <= {(16, 16), (16, 8), (8, 16), (8, 8)}
     assert len(shapes) >= 2
 

@@ -10,7 +10,7 @@ def pytest_sessionstart(session):
     """Fixtures are committed and pinned: a silently different bitstream would change
     every measured number in this suite."""
     sums = (ASSETS / "SHA256SUMS").read_text().split()
-    for digest, name in zip(sums[0::2], sums[1::2]):
+    for digest, name in zip(sums[0::2], sums[1::2], strict=True):
         actual = hashlib.sha256((ASSETS / name).read_bytes()).hexdigest()
         assert actual == digest, f"fixture {name} changed; rerun tools/regen_fixtures.sh"
 
