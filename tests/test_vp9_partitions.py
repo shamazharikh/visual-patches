@@ -7,8 +7,6 @@ exact tiling. This suite pins the properties that make it worth having.
 
 from collections import Counter
 
-import pytest
-
 from vpatch.backends import extract_video
 from vpatch.backends.ffmpeg_video import VideoExtractor
 

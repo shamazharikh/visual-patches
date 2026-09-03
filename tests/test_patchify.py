@@ -8,11 +8,11 @@ import pytest
 from vpatch.backends.ffmpeg_video import extract_video
 from vpatch.partition import grid_shape, overlap_pixels
 from vpatch.patchify import (
-    D,
     FEATURE_LAYOUT,
     KIND_INTER,
     KIND_INTRA,
     KIND_UNKNOWN,
+    D,
     frame_features,
     patchify_grid,
 )

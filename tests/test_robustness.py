@@ -101,7 +101,7 @@ def test_a_motionless_clip_is_not_confused_with_a_codec_that_exports_no_motion(s
 def _reference_features(frame, cell):
     """Deliberately naive per-unit, per-cell aggregation to check the vectorised path."""
     from vpatch.partition import grid_shape
-    from vpatch.patchify import D, FEATURE_LAYOUT
+    from vpatch.patchify import FEATURE_LAYOUT, D
 
     idx = {n: i for i, n in enumerate(FEATURE_LAYOUT)}
     rows, cols = grid_shape(frame.width, frame.height, cell)

@@ -3,7 +3,6 @@
 from collections import Counter
 
 import av
-import pytest
 from av.codec.context import Flags2
 
 from vpatch.backends import extract_video

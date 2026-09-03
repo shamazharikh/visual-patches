@@ -37,7 +37,6 @@ import numpy as np
 from vpatch.backends.ffmpeg_video import VideoExtractor
 from vpatch.patchify import FEATURE_LAYOUT, patchify_grid
 from vpatch.sampling import anchor_delta, keyframe_anchors
-from vpatch.types import UnitKind
 
 IDX = {n: i for i, n in enumerate(FEATURE_LAYOUT)}
 
@@ -133,7 +132,8 @@ def _heat(v: float) -> str:
     i = min(int(pos), len(stops) - 2)
     f = pos - i
     a, b = stops[i], stops[i + 1]
-    return "rgb(%d,%d,%d)" % tuple(int(a[k] + (b[k] - a[k]) * f) for k in range(3))
+    r, g, bl = (int(a[k] + (b[k] - a[k]) * f) for k in range(3))
+    return f"rgb({r},{g},{bl})"
 
 
 def panel_qp(frame) -> str:

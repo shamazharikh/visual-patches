@@ -188,7 +188,7 @@ def test_prune_composes_delta_then_cap(h264):
 def test_prune_skips_the_cap_when_delta_pruning_already_fits(static_box):
     frames = extract_video(static_box, pixels=False)
     bundle = patchify_grid(frames)
-    out, report = prune(bundle, anchors=keyframe_anchors(frames), max_tokens=1_000_000)
+    _, report = prune(bundle, anchors=keyframe_anchors(frames), max_tokens=1_000_000)
     assert report.policy == "anchor_delta"
     assert "over_budget" not in report.by_rule
 
