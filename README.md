@@ -1,5 +1,10 @@
 # vpatch
 
+[![Python](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
+[![PyAV](https://img.shields.io/badge/av-%E2%89%A518.1-blue)](https://github.com/PyAV-Org/PyAV)
+[![ffmpeg](https://img.shields.io/badge/ffmpeg-public%20API%20only-brightgreen)](#what-each-codec-actually-gives-you)
+[![scope](https://img.shields.io/badge/scope-extraction%20only%20%E2%80%94%20no%20model%2C%20no%20weights-lightgrey)](#)
+
 Codecs already segment every frame and estimate its motion. Decoding to pixels and cutting
 a uniform patch grid throws that work away. `vpatch` reads it back out of the compressed
 bitstream — motion vectors, per-block QP, partition geometry, frame structure — and
