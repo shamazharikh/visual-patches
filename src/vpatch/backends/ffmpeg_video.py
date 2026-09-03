@@ -356,8 +356,31 @@ class VideoExtractor:
                 f"decoder flagged frame pts={frame.pts} corrupt; concealed metadata is fabricated"
             )
 
+        # PyAV maps every side-data entry through an IntEnum while building the
+        # container, so a single type it does not recognise makes ALL of them
+        # unreadable, not just the unknown one. An Exif APP1 segment is enough:
+        # libavcodec attaches side data of type 31 for it and PyAV 18.1's enum stops at
+        # 27, so `extract()` raised a bare ValueError from inside a dependency on almost
+        # any photograph a camera has taken. Isolated by stripping segments one at a
+        # time -- APP1 is the trigger, and a 36-byte minimal Exif reproduces it.
+        #
+        # Nothing is lost when the codec exports no metadata to begin with, which is the
+        # still-image case. When it does, the loss is real, and strict mode refuses
+        # rather than reporting an unread frame as a measured empty one.
+        try:
+            side = frame.side_data
+        except ValueError as exc:
+            exports_something = (cap.motion_vectors or cap.partitions or cap.per_block_qp)
+            if exports_something and self.strict:
+                raise UnsupportedCodecFeature(
+                    f"libav attached a side-data type this build of PyAV cannot "
+                    f"enumerate ({exc}); {cap.codec} exports metadata that therefore "
+                    f"cannot be read from frame pts={frame.pts}"
+                ) from exc
+            side = None
+
         qp_map = None
-        enc = frame.side_data.get("VIDEO_ENC_PARAMS")
+        enc = side.get("VIDEO_ENC_PARAMS") if side is not None else None
         if enc is not None and cap.codec not in TREE_CAPABLE:
             # qp_map() assumes a fixed macroblock grid; for a variable tree the per-block
             # delta_qp on each unit is the honest representation.
@@ -373,7 +396,8 @@ class VideoExtractor:
         if cap.codec in TREE_CAPABLE and enc is not None and enc.nb_blocks:
             units, occupancy = _units_from_enc_params(enc, w, h)
 
-        mv = frame.side_data.get("MOTION_VECTORS") if cap.motion_vectors else None
+        mv = (side.get("MOTION_VECTORS")
+              if cap.motion_vectors and side is not None else None)
         if mv is not None:
             arr = mv.to_ndarray()
             shapes = set(zip(arr["w"].tolist(), arr["h"].tolist(), strict=True))

@@ -89,3 +89,58 @@ def av1():
 def reschange():
     """Two resolutions concatenated as Annex-B; the decoder re-inits at the second SPS."""
     return str(ASSETS / "reschange.264")
+
+
+def _encode_jpeg(path: str, dest) -> str:
+    """Frame 0 of a fixture, written out as a JPEG.
+
+    Built at runtime rather than committed: a single intra frame has no inter-frame
+    bitstream behaviour worth pinning by sha256, which is the only reason the other
+    fixtures are binaries in the tree.
+    """
+    import av
+    import numpy as np
+
+    from vpatch.backends.ffmpeg_video import VideoExtractor
+
+    luma = VideoExtractor(path, pixels=True, max_frames=1).extract()[0].pixels
+    rgb = np.repeat(luma[:, :, None], 3, axis=2)
+    with av.open(str(dest), mode="w", format="mjpeg") as container:
+        stream = container.add_stream("mjpeg", rate=1)
+        stream.width, stream.height = luma.shape[1], luma.shape[0]
+        stream.pix_fmt = "yuvj420p"
+        frame = av.VideoFrame.from_ndarray(np.ascontiguousarray(rgb), format="rgb24")
+        for packet in stream.encode(frame):
+            container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    return str(dest)
+
+
+@pytest.fixture
+def still_jpeg(h264, tmp_path):
+    return _encode_jpeg(h264, tmp_path / "still.jpg")
+
+
+@pytest.fixture
+def exif_jpeg(still_jpeg, tmp_path):
+    """The same still with a minimal Exif APP1 segment -- one IFD0 orientation entry.
+
+    Almost every camera JPEG carries Exif, and libavcodec turns it into a frame
+    side-data entry of a type PyAV's enum does not cover, which is enough to make the
+    whole side-data container unreadable.
+    """
+    import struct
+
+    tiff = b"II*\x00" + struct.pack("<I", 8)
+    ifd = (struct.pack("<H", 1)
+           + struct.pack("<HHI", 0x0112, 3, 1) + struct.pack("<I", 1)
+           + struct.pack("<I", 0))
+    body = b"Exif\x00\x00" + tiff + ifd
+    app1 = b"\xff\xe1" + struct.pack(">H", len(body) + 2) + body
+
+    raw = pathlib.Path(still_jpeg).read_bytes()
+    end = 2 + 2 + struct.unpack(">H", raw[4:6])[0]   # APP1 must follow APP0, not precede it
+    dest = tmp_path / "exif.jpg"
+    dest.write_bytes(raw[:end] + app1 + raw[end:])
+    return str(dest)

@@ -97,30 +97,22 @@ def test_visualizer_produces_a_self_contained_page(h264, tmp_path):
     assert base64.b64decode(embedded)[:3] == b"\xff\xd8\xff"  # JPEG magic
 
 
-def test_visualizer_on_a_still_reports_absence_instead_of_zero(h264, tmp_path):
+def test_visualizer_on_a_still_reports_absence_instead_of_zero(still_jpeg, tmp_path):
     """A still must not render as a clip whose encoder happened to find no motion.
 
     Those are different facts and the page used to conflate them: with no motion it
     still printed "peak 1.0px" (the divide-by-zero guard, not a measurement) and
     "100% kept" (every token survives because the only frame is its own anchor). Both
-    read as results. The JPEG is made here rather than committed because it only has
-    to be a single frame -- pinning a bitstream would be pinning nothing.
+    read as results.
     """
-    import base64
     import re
     import sys
 
     sys.path.insert(0, "tools")
-    from visualize import _jpeg_data_uri, build
-
-    from vpatch.backends.ffmpeg_video import VideoExtractor
-
-    frame = VideoExtractor(h264, pixels=True, max_frames=1).extract()[0]
-    still = tmp_path / "still.jpg"
-    still.write_bytes(base64.b64decode(_jpeg_data_uri(frame.pixels).split(",", 1)[1]))
+    from visualize import build
 
     out = tmp_path / "still.html"
-    build(str(still), str(out), frame_index=None, cell=16)
+    build(still_jpeg, str(out), frame_index=None, cell=16)
     doc = out.read_text()
 
     assert doc.count("<figure>") == 8

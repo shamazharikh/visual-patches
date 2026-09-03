@@ -151,3 +151,32 @@ def test_extraction_stays_within_the_hard_unit_bound(hd):
     bound = max_units_per_frame(frames[0].width, frames[0].height)
     for f in frames:
         assert len(f.units) <= bound
+
+
+def test_exif_does_not_make_a_photograph_unreadable(exif_jpeg):
+    """An ordinary camera JPEG must not fail the way a corrupt one does.
+
+    PyAV maps every side-data entry through an IntEnum while building the container, so
+    a single type it does not recognise makes all of them unreadable -- not just the
+    unknown one. libavcodec attaches a type 31 when a JPEG carries an Exif APP1 segment
+    and PyAV 18.1 stops at 27, so extract() raised a bare ValueError from inside a
+    dependency on almost every photograph ever taken by a camera. Nothing is actually
+    lost here: mjpeg exports no motion, no partitions and no QP, so there was never a
+    side-data entry this library wanted.
+    """
+    frames = extract_video(exif_jpeg, pixels=False)
+    assert len(frames) == 1
+    frame = frames[0]
+    assert frame.units, "the fallback grid should still be laid out"
+    assert not frame.observed_units
+    assert frame.qp_map is None
+
+
+def test_an_exif_photo_reads_the_same_as_the_same_photo_without_exif(exif_jpeg, still_jpeg):
+    """Tolerating the unknown type must not change what is extracted from the picture."""
+    plain = extract_video(still_jpeg, pixels=False)[0]
+    exif = extract_video(exif_jpeg, pixels=False)[0]
+    assert (exif.width, exif.height) == (plain.width, plain.height)
+    assert len(exif.units) == len(plain.units)
+    assert [(u.x, u.y, u.w, u.h) for u in exif.units] == \
+           [(u.x, u.y, u.w, u.h) for u in plain.units]
