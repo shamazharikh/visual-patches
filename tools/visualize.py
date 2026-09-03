@@ -2,12 +2,21 @@
 """Render what vpatch extracted from one frame, as a self-contained HTML page.
 
     uv run python tools/visualize.py CLIP.mp4 -o out.html [--frame N] [--cell 16]
+    uv run python tools/visualize.py PHOTO.jpg -o out.html
 
-Six panels over the same frame: the decoded picture, the encoder's own partition
-geometry, its motion field, its per-macroblock QP, the aggregated grid tokens, and which
-of those tokens survive anchored pruning. The point is to make the claims checkable by
+Eight panels over the same frame: the decoded picture, the encoder's own partition
+geometry, its motion field, its per-macroblock and per-unit QP, the aggregated grid
+tokens, and which of those tokens survive anchored pruning. The point is to make the claims checkable by
 eye -- block sizes really are only four, motion really does concentrate where things
 move, and the variance channel really does light up where a mean would not.
+
+A panel with nothing behind it is drawn as an explicit empty card naming the reason,
+never as a blank overlay with a caption implying data. Two reasons are distinguished,
+because they are not the same fact: the codec exports nothing (HEVC, AV1, VP8, and the
+still formats -- JPEG, PNG, WebP), or the input is a single image, where a motion vector
+has no reference frame to point at and pruning has nothing to prune against. A still
+therefore renders the picture, the fallback grid vpatch synthesises over it, and little
+else -- which is the honest answer, not a degraded one.
 
 Writes one file with the image embedded, so it can be opened anywhere. No plotting
 dependency: the photo layer is JPEG-encoded through PyAV and the overlays are hand-built
@@ -199,6 +208,28 @@ def panel_kept(kept_mask, rows, cols, cell, w, h) -> str:
     return "".join(parts)
 
 
+def _empty(w: int, h: int, reason: str) -> str:
+    """A panel with no data behind it, drawn so it cannot be mistaken for a null result.
+
+    The alternative -- an overlay that simply draws nothing -- is worse than useless
+    here, because the caption underneath it would still report a number. Zero motion
+    because the codec exports none and zero motion because the input is one photograph
+    are different facts, and neither is "the encoder found no motion".
+    """
+    # Drawn as a short band rather than at frame height: a still leaves six of the eight
+    # panels empty, and six full-size black rectangles would make the page mostly a
+    # scroll through nothing. Width is kept so the cards still line up.
+    band = max(44.0, h / 5)
+    return (f'<svg viewBox="0 0 {w} {band:.0f}" xmlns="http://www.w3.org/2000/svg" '
+            f'preserveAspectRatio="xMidYMid meet" role="img">'
+            f'<rect x="1" y="1" width="{w - 2}" height="{band - 2:.0f}" fill="#0b0d10" '
+            f'stroke="#39414c" stroke-width="1.2" stroke-dasharray="7 6" rx="6"/>'
+            f'<text x="{w / 2}" y="{band / 2:.0f}" fill="#7f8b99" '
+            f'font-size="{band / 3.2:.1f}" dominant-baseline="central" '
+            f'font-family="ui-sans-serif,system-ui,sans-serif" text-anchor="middle">'
+            f'{html.escape(reason)}</text></svg>')
+
+
 def build(path: str, out: str, frame_index: int | None, cell: int) -> str:
     ex = VideoExtractor(path, pixels=True, max_frames=64)
     cap = ex.capability()
@@ -212,6 +243,9 @@ def build(path: str, out: str, frame_index: int | None, cell: int) -> str:
     speed = np.hypot(bundle.features[:, IDX["l0_dx_mean"]],
                      bundle.features[:, IDX["l0_dy_mean"]])
     if frame_index is None:
+        # argmax over an all-zero motion array silently returns 0; that is the right
+        # frame for a still and an arbitrary one for a codec that exports no motion,
+        # so only the first case gets to call itself a choice.
         per_frame = [float(speed[bundle.times == t].sum()) for t in range(len(frames))]
         frame_index = int(np.argmax(per_frame))
     frame = frames[frame_index]
@@ -243,40 +277,89 @@ def build(path: str, out: str, frame_index: int | None, cell: int) -> str:
     std_ch = np.hypot(feat[..., IDX["l0_dx_std"]], feat[..., IDX["l0_dy_std"]])
     max_std = float(std_ch.max()) or 1.0
 
+    # A single decoded frame is a still: not a short clip, a different question. Motion
+    # vectors are displacements from a reference picture and pruning is defined against
+    # a previous frame, so both are undefined here rather than empty. Keyed on the frame
+    # count, not the file extension -- a one-frame .mp4 is a still, and an animated GIF
+    # is not.
+    still = len(frames) == 1
+    no_motion = "a single image has no reference frame to measure motion against" \
+        if still else f"{cap.codec} exports no motion vectors at any ffmpeg version"
+    has_motion = bool(mv_units)
+    unit_qps = [u.qp for u in frame.units if u.qp is not None]
+
+    if observed:
+        units_sub = (f"{len(observed)} observed partitions; "
+                     + ", ".join(f"{k[0]}x{k[1]}: {v}"
+                                 for k, v in sorted(shapes.items(), reverse=True))
+                     + f"; {len(frame.units) - len(observed)} grid-filled")
+    else:
+        # Every unit is synthetic. Worth drawing anyway -- it is exactly what patchify
+        # aggregates over -- but the title must not credit the encoder for it.
+        units_sub = (f"none exported by {cap.codec}; all {len(frame.units)} units are the "
+                     f"fallback 16x16 grid vpatch synthesises to keep the layout defined")
+
     panels = [
         ("Decoded frame",
-         f"{w}x{h}, {frame.pict_type}-frame, display index {frame_index} of {len(frames)}",
+         (f"{w}x{h}, {frame.pict_type}-frame, single image"
+          if still else
+          f"{w}x{h}, {frame.pict_type}-frame, display index {frame_index} "
+          f"of {len(frames)}"),
          _svg(w, h, "", img)),
-        ("Coding units the encoder chose",
-         f"{len(observed)} observed partitions; "
-         + ", ".join(f"{k[0]}x{k[1]}: {v}" for k, v in sorted(shapes.items(), reverse=True))
-         + f"; {len(frame.units) - len(observed)} grid-filled",
+        ("Coding units the encoder chose" if observed else "Coding units - none exported",
+         units_sub,
          _svg(w, h, panel_partitions(frame), img, dim=0.55)),
         ("Motion field",
-         f"{len(mv_units)} units carry motion, peak {max_speed:.1f}px; arrows drawn 3x",
-         _svg(w, h, panel_motion(frame), img, dim=0.62)),
+         (f"{len(mv_units)} units carry motion, peak {max_speed:.1f}px; arrows drawn 3x"
+          if has_motion else no_motion),
+         _svg(w, h, panel_motion(frame), img, dim=0.62) if has_motion
+         else _empty(w, h, "no motion vectors")),
         ("Per-macroblock QP",
          (f"range {int(frame.qp_map.min())}-{int(frame.qp_map.max())} across "
           f"{frame.qp_map.shape[1]}x{frame.qp_map.shape[0]} macroblocks"
-          if frame.qp_map is not None else "not exported by this codec"),
-         _svg(w, h, panel_qp(frame), img, dim=0.4)),
+          if frame.qp_map is not None else f"not exported by {cap.codec}"),
+         _svg(w, h, panel_qp(frame), img, dim=0.4) if frame.qp_map is not None
+         else _empty(w, h, "no per-macroblock QP")),
+        ("Per-unit QP",
+         (f"{len(unit_qps)} units carry their own QP, range {min(unit_qps)}-"
+          f"{max(unit_qps)}"
+          + ("; the same values the map above shows, on the coding-unit grid"
+             if frame.qp_map is not None else
+             "; VP9 carries this per block of a variable tree, so there is no fixed "
+             "grid to draw it on and the panel above cannot show it")
+          if unit_qps else f"not exported by {cap.codec}"),
+         _svg(w, h, panel_unit_qp(frame), img, dim=0.4) if unit_qps
+         else _empty(w, h, "no per-unit QP")),
         (f"Grid tokens - motion magnitude (cell {cell})",
-         f"{rows}x{cols} = {rows * cols} tokens for this frame",
+         (f"{rows}x{cols} = {rows * cols} tokens for this frame"
+          if has_motion else
+          f"{rows}x{cols} = {rows * cols} tokens are still laid out, but the motion "
+          f"channels are all zero: {no_motion}"),
          _svg(w, h, panel_cells(feat[..., IDX["l0_mag_mean"]], cell, w, h,
-                                max(max_speed, 1.0)), img, dim=0.5)),
+                                max(max_speed, 1.0)), img, dim=0.5) if has_motion
+         else _empty(w, h, "no motion to aggregate")),
         ("Grid tokens - motion variance",
-         f"{int((std_ch > 0.5).sum())} cells where the encoder found more than one "
-         "motion inside one cell; a plain mean over the cell would erase exactly this",
-         _svg(w, h, panel_cells(std_ch, cell, w, h, max_std), img, dim=0.5)),
+         (f"{int((std_ch > 0.5).sum())} cells where the encoder found more than one "
+          "motion inside one cell; a plain mean over the cell would erase exactly this"
+          if has_motion else no_motion),
+         _svg(w, h, panel_cells(std_ch, cell, w, h, max_std), img, dim=0.5) if has_motion
+         else _empty(w, h, "no motion to aggregate")),
         ("Survives anchored pruning",
-         f"{int(kept.sum())} of {kept.size} kept on this frame; clip kept "
-         f"{report.kept_fraction * 100:.1f}%, cells never emitted: {report.cells_never_kept}",
-         _svg(w, h, panel_kept(kept, rows, cols, cell, w, h), img, dim=0.45)),
+         (f"{int(kept.sum())} of {kept.size} kept on this frame; clip kept "
+          f"{report.kept_fraction * 100:.1f}%, cells never emitted: "
+          f"{report.cells_never_kept}"
+          if not still else
+          "undefined for a still: the only frame is itself the anchor, so every token "
+          "survives by construction and the 100% would measure nothing"),
+         _svg(w, h, panel_kept(kept, rows, cols, cell, w, h), img, dim=0.45)
+         if not still else _empty(w, h, "nothing to prune against")),
     ]
 
-    legend = "".join(
-        f'<span class="k"><i style="background:{c}"></i>{s[0]}x{s[1]}</span>'
-        for s, c in SHAPE_COLOURS.items()
+    # The shape swatches are a key to colours that only appear when the encoder exported
+    # geometry; on a still they would advertise six block sizes the page never draws.
+    legend = (
+        "".join(f'<span class="k"><i style="background:{c}"></i>{s[0]}x{s[1]}</span>'
+                for s, c in SHAPE_COLOURS.items()) if observed else ""
     ) + f'<span class="k"><i style="background:{FILL_COLOUR}"></i>grid fill</span>'
 
     cards = "".join(
@@ -314,8 +397,10 @@ def build(path: str, out: str, frame_index: int | None, cell: int) -> str:
 <main>
 <h1>What the codec already knew</h1>
 <p class="lead">Every overlay below is read out of the compressed bitstream, not computed
-from the decoded picture. Source: <code>{html.escape(path.rsplit("/", 1)[-1])}</code>,
-{html.escape(cap.codec)}.</p>
+from the decoded picture -- so where the bitstream carries nothing, the panel says so
+instead of drawing an empty one. Source:
+<code>{html.escape(path.rsplit("/", 1)[-1])}</code>, {html.escape(cap.codec)}{
+" -- a single image" if still else f", {len(frames)} frames"}.</p>
 <div class="legend">{legend}</div>
 {cards}
 <footer>Generated by <code>tools/visualize.py</code>. Motion is in luma pixels; no
@@ -331,7 +416,8 @@ def main() -> int:
     ap.add_argument("path")
     ap.add_argument("-o", "--out", default="vpatch-panels.html")
     ap.add_argument("--frame", type=int, default=None,
-                    help="display index; default picks the frame with the most motion")
+                    help="display index; default picks the frame with the most motion, "
+                         "or frame 0 for a still or a codec that exports no motion")
     ap.add_argument("--cell", type=int, default=16)
     args = ap.parse_args()
     print(build(args.path, args.out, args.frame, args.cell))

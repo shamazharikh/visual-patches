@@ -98,12 +98,19 @@ Two renderers, both writing one self-contained HTML file with everything embedde
 
 ```bash
 uv run python tools/visualize.py CLIP.mp4 -o panels.html          # one frame, every channel
+uv run python tools/visualize.py PHOTO.jpg -o panels.html         # a still works too
 uv run python tools/visualize_clip.py CLIP.webm -o clip.html \
     --compare ORIGINAL.mp4                                        # every frame, one channel
 ```
 
 `visualize.py` freezes a frame and draws partitions, motion, QP, the aggregated grid
-tokens and the pruning mask over it. `visualize_clip.py` is the other axis — it re-encodes
+tokens and the pruning mask over it. It accepts a still image as readily as a clip, and a
+still is the sharpest demonstration of the table above: JPEG, PNG and WebP export none of
+the three axes, so six of the eight panels come back as an explicit *this is not here*
+rather than an empty overlay under a caption reporting zero. Absence and a measured zero
+are different answers, and the page never lets them look alike.
+
+`visualize_clip.py` is the other axis — it re-encodes
 the partition overlay as a video so a whole clip plays, and adds per-frame traces. It is
 aimed at VP9, whose only contribution is a quadtree, and a quadtree says nothing until you
 watch it move.

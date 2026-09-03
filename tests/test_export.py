@@ -88,13 +88,54 @@ def test_visualizer_produces_a_self_contained_page(h264, tmp_path):
     # Self-contained: the picture is embedded, nothing is fetched.
     assert "data:image/jpeg;base64," in doc
     assert "http://" not in doc.replace("http://www.w3.org/2000/svg", "")
-    assert doc.count("<figure>") == 7
+    assert doc.count("<figure>") == 8
     # Overlays actually drew something.
     assert doc.count("<rect") > 100
     assert "<line" in doc
     embedded = re.search(r"data:image/jpeg;base64,([A-Za-z0-9+/=]+)", doc).group(1)
     import base64
     assert base64.b64decode(embedded)[:3] == b"\xff\xd8\xff"  # JPEG magic
+
+
+def test_visualizer_on_a_still_reports_absence_instead_of_zero(h264, tmp_path):
+    """A still must not render as a clip whose encoder happened to find no motion.
+
+    Those are different facts and the page used to conflate them: with no motion it
+    still printed "peak 1.0px" (the divide-by-zero guard, not a measurement) and
+    "100% kept" (every token survives because the only frame is its own anchor). Both
+    read as results. The JPEG is made here rather than committed because it only has
+    to be a single frame -- pinning a bitstream would be pinning nothing.
+    """
+    import base64
+    import re
+    import sys
+
+    sys.path.insert(0, "tools")
+    from visualize import _jpeg_data_uri, build
+
+    from vpatch.backends.ffmpeg_video import VideoExtractor
+
+    frame = VideoExtractor(h264, pixels=True, max_frames=1).extract()[0]
+    still = tmp_path / "still.jpg"
+    still.write_bytes(base64.b64decode(_jpeg_data_uri(frame.pixels).split(",", 1)[1]))
+
+    out = tmp_path / "still.html"
+    build(str(still), str(out), frame_index=None, cell=16)
+    doc = out.read_text()
+
+    assert doc.count("<figure>") == 8
+    # Six of the eight panels are absent, not empty: three motion panels, pruning, and
+    # both QP panels -- JPEG exports no quantiser either. Only the picture and the
+    # synthesised grid remain.
+    assert doc.count("stroke-dasharray") == 6
+    assert "no reference frame" in doc
+    assert "single image" in doc
+    # No fabricated measurement survives anywhere on the page.
+    assert "peak" not in doc
+    assert not re.search(r"kept on this frame", doc)
+    # What is real is still drawn: the picture, and the grid vpatch synthesises.
+    assert "data:image/jpeg;base64," in doc
+    assert "fallback 16x16 grid" in doc
 
 
 def test_clip_visualizer_measures_the_tree_against_a_real_motion_reference(
